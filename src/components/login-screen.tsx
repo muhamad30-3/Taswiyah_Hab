@@ -1,17 +1,55 @@
 "use client"
 
-import { useState } from "react"
+import { useEffect, useState } from "react"
 import { Lock, User, Eye, EyeOff, ArrowLeft } from "lucide-react"
+import { centralLogin, centralRegister, centralStorageEnabled, type CentralUser } from "../lib/central-storage"
+import { passwordPolicyError } from "../lib/password-policy"
 
-export function LoginScreen({ onLogin }: { onLogin: (username: string) => void }) {
+export function LoginScreen({ onLogin, initialError }: { onLogin: (user: CentralUser) => void; initialError?: string }) {
   const [username, setUsername] = useState("")
+  const [email, setEmail] = useState("")
   const [password, setPassword] = useState("")
   const [showPassword, setShowPassword] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [notice, setNotice] = useState<string | null>(null)
+  const [showDefaultCredentials, setShowDefaultCredentials] = useState(false)
+  const [registrationMode, setRegistrationMode] = useState(false)
+  const [busy, setBusy] = useState(false)
 
-  const handleSubmit = (e: React.FormEvent) => {
+  useEffect(() => {
+    if (initialError) setError(initialError)
+    if (!centralStorageEnabled) setShowDefaultCredentials(!localStorage.getItem("recon_credentials"))
+  }, [initialError])
+
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
     setError(null)
+    setNotice(null)
+    if (centralStorageEnabled) {
+      if (registrationMode) {
+        const passwordError = passwordPolicyError(password)
+        if (passwordError) {
+          setError(passwordError)
+          return
+        }
+      }
+      setBusy(true)
+      try {
+        if (registrationMode) {
+          await centralRegister(username.trim(), email.trim(), password)
+          setRegistrationMode(false)
+          setPassword("")
+          setNotice("تم إنشاء الحساب. سيصبح الدخول متاحاً بعد موافقة المسؤول.")
+        } else {
+          onLogin(await centralLogin(username.trim(), password))
+        }
+      } catch (cause) {
+        setError(cause instanceof Error ? cause.message : "تعذر تسجيل الدخول إلى الخادم.")
+      } finally {
+        setBusy(false)
+      }
+      return
+    }
 
     const stored = (() => {
       try {
@@ -26,7 +64,7 @@ export function LoginScreen({ onLogin }: { onLogin: (username: string) => void }
 
     if (username.trim() === creds.username && password === creds.password) {
       localStorage.setItem("recon_auth", JSON.stringify({ username: creds.username, at: Date.now() }))
-      onLogin(creds.username)
+      onLogin({ username: creds.username, role: "admin" })
     } else {
       setError("اسم المستخدم أو كلمة المرور غير صحيحة")
     }
@@ -43,7 +81,7 @@ export function LoginScreen({ onLogin }: { onLogin: (username: string) => void }
             <p className="mt-10 max-w-xs text-3xl font-bold leading-[1.45]">قرار مالي واضح، من أول كشف.</p>
             <p className="mt-4 max-w-sm text-sm leading-7 text-white/70">مساحة عمل يومية لمراجعة الفواتير والحوالات، مع أثر واضح لكل مطابقة.</p>
           </div>
-          <div className="flex items-center gap-2 text-xs text-white/55"><span className="h-2 w-2 rounded-full bg-[hsl(43_96%_52%)]" /> بياناتك محفوظة محلياً في هذا المتصفح</div>
+          <div className="flex items-center gap-2 text-xs text-white/55"><span className="h-2 w-2 rounded-full bg-[hsl(43_96%_52%)]" /> {centralStorageEnabled ? "بياناتك تحفظ في قاعدة البيانات المركزية" : "بياناتك محفوظة محلياً في هذا المتصفح"}</div>
         </div>
         <div className="p-6 sm:p-10">
           <div className="mb-8 flex items-center gap-3 md:hidden">
@@ -52,8 +90,8 @@ export function LoginScreen({ onLogin }: { onLogin: (username: string) => void }
           </div>
           <div className="mb-8">
             <div className="mb-2 text-xs font-semibold tracking-[.15em] text-[hsl(43_96%_52%)]">TASWIYAH HUB</div>
-            <h1 className="text-2xl font-bold text-white">أهلاً بك في مكتبك المالي</h1>
-            <p className="mt-2 text-sm text-white/55">سجّل الدخول للمتابعة إلى مساحة التسوية</p>
+            <h1 className="text-2xl font-bold text-white">{registrationMode ? "إنشاء حساب جديد" : "أهلاً بك في مكتبك المالي"}</h1>
+            <p className="mt-2 text-sm text-white/55">{registrationMode ? "سيراجع المسؤول طلبك قبل تفعيل الحساب" : "سجّل الدخول للمتابعة إلى مساحة التسوية"}</p>
           </div>
 
         <form
@@ -72,11 +110,30 @@ export function LoginScreen({ onLogin }: { onLogin: (username: string) => void }
                 autoComplete="username"
                 value={username}
                 onChange={(e) => setUsername(e.target.value)}
-              className="w-full rounded-xl border border-white/10 bg-white/[.07] py-3 pr-9 pl-3 text-sm text-white outline-none placeholder:text-white/30 focus:border-[hsl(43_96%_52%)] focus:ring-1 focus:ring-[hsl(43_96%_52%/.25)]"
-                placeholder="admin"
+                required
+                minLength={3}
+                maxLength={32}
+                className="w-full rounded-xl border border-white/10 bg-white/[.07] py-3 pr-9 pl-3 text-sm text-white outline-none placeholder:text-white/30 focus:border-[hsl(43_96%_52%)] focus:ring-1 focus:ring-[hsl(43_96%_52%/.25)]"
+                placeholder={registrationMode ? "اسم المستخدم" : "اسم المستخدم"}
               />
             </div>
           </div>
+
+          {registrationMode && (
+            <div className="space-y-1.5">
+              <label htmlFor="email" className="text-xs font-medium text-muted-foreground">البريد الإلكتروني</label>
+              <input
+                id="email"
+                type="email"
+                autoComplete="email"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                className="w-full rounded-xl border border-white/10 bg-white/[.07] px-3 py-3 text-sm text-white outline-none placeholder:text-white/30 focus:border-[hsl(43_96%_52%)] focus:ring-1 focus:ring-[hsl(43_96%_52%/.25)]"
+                placeholder="name@example.com"
+                required
+              />
+            </div>
+          )}
 
           <div className="space-y-1.5">
             <label htmlFor="password" className="text-xs font-medium text-muted-foreground">
@@ -87,9 +144,12 @@ export function LoginScreen({ onLogin }: { onLogin: (username: string) => void }
               <input
                 id="password"
                 type={showPassword ? "text" : "password"}
-                autoComplete="current-password"
+                autoComplete={registrationMode ? "new-password" : "current-password"}
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
+                minLength={registrationMode ? 8 : undefined}
+                maxLength={256}
+                required
               className="w-full rounded-xl border border-white/10 bg-white/[.07] py-3 pr-9 pl-9 text-sm text-white outline-none placeholder:text-white/30 focus:border-[hsl(43_96%_52%)] focus:ring-1 focus:ring-[hsl(43_96%_52%/.25)]"
                 placeholder="••••••••"
               />
@@ -102,6 +162,7 @@ export function LoginScreen({ onLogin }: { onLogin: (username: string) => void }
                 {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
               </button>
             </div>
+            {registrationMode && <p className="text-xs text-white/60">8 محارف على الأقل، تشمل حرفاً ورقماً.</p>}
           </div>
 
           {error && (
@@ -109,17 +170,31 @@ export function LoginScreen({ onLogin }: { onLogin: (username: string) => void }
               {error}
             </p>
           )}
+          {notice && <p role="status" className="rounded-lg bg-emerald-500/10 px-3 py-2 text-xs font-medium text-emerald-300">{notice}</p>}
 
           <button
             type="submit"
+            disabled={busy}
             className="group flex w-full items-center justify-center gap-2 rounded-xl bg-[hsl(43_96%_52%)] py-3 text-sm font-bold text-[hsl(216_48%_15%)] transition-colors hover:bg-[hsl(43_96%_60%)]"
           >
-            تسجيل الدخول <ArrowLeft className="h-4 w-4 transition-transform group-hover:-translate-x-1" />
+            {busy ? "جارٍ التحقق..." : registrationMode ? "إرسال طلب إنشاء الحساب" : "تسجيل الدخول"} <ArrowLeft className="h-4 w-4 transition-transform group-hover:-translate-x-1" />
           </button>
 
-          <p className="text-center text-xs text-muted-foreground">
-            الحساب الافتراضي: admin / admin123
-          </p>
+          {centralStorageEnabled && (
+            <button
+              type="button"
+              onClick={() => { setRegistrationMode(value => !value); setError(null); setNotice(null) }}
+              className="w-full rounded-xl border border-white/15 py-3 text-sm font-semibold text-white/80 transition-colors hover:bg-white/5"
+            >
+              {registrationMode ? "لديك حساب؟ تسجيل الدخول" : "إنشاء حساب جديد"}
+            </button>
+          )}
+
+          {showDefaultCredentials && !centralStorageEnabled && (
+            <p className="text-center text-xs text-muted-foreground">
+              الحساب الافتراضي: admin / admin123
+            </p>
+          )}
         </form>
       </div>
       </div>

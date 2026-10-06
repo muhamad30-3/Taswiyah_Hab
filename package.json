@@ -4,7 +4,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "vite --config vite.config.ts --host 0.0.0.0",
+    "dev": "node scripts/dev.mjs",
+    "dev:web": "vite --config vite.config.ts --host 0.0.0.0",
     "build": "vite build --config vite.config.ts",
     "serve": "vite preview --config vite.config.ts --host 0.0.0.0",
     "typecheck": "tsc -p tsconfig.json --noEmit"
@@ -85,5 +86,13 @@
     "overrides": {
       "lightningcss": "1.33.0"
     }
+  },
+  "dependencies": {
+    "docx": "^9.8.1",
+    "jszip": "^3.10.2",
+    "pdfjs-dist": "^4.10.38",
+    "pptxgenjs": "^4.0.1",
+    "tesseract.js": "^7.0.0",
+    "xlsx-js-style": "^1.2.0"
   }
 }

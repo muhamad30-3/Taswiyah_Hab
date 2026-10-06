@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
-import { ArrowLeft, Check, ChevronLeft, ChevronRight, Plus, Search, Trash2, WalletCards, X } from "lucide-react";
+import { ArrowLeft, Check, ChevronLeft, ChevronRight, Plus, Search, Star, Trash2, WalletCards, X } from "lucide-react";
 
 export interface ToolBankRow {
   id: number;
@@ -8,6 +8,7 @@ export interface ToolBankRow {
   rawAmount: number;
   type: "مدفوع" | "مستلم";
   accountType: string;
+  defaultRef?: string;
   _fileSessionId?: number;
 }
 
@@ -22,6 +23,7 @@ export interface ToolCashierRow {
   type: "مدفوع" | "مستلم";
   accountType: string;
   ref: string;
+  defaultRef?: string;
   date: string;
   orig: Record<string, unknown>;
   _fileSessionId?: number;
@@ -86,6 +88,17 @@ export function syntheticTransactionId(key: string): number {
     hash = Math.imul(hash, 16777619);
   }
   return -1_000_000 - ((hash >>> 0) % 1_000_000_000);
+}
+
+function ReferenceButton({ row, onLocate }: {
+  row: { id: number; _fileSessionId?: number; defaultRef?: string; rawAmount?: number };
+  onLocate?: (row: { id: number; _fileSessionId?: number; defaultRef?: string; rawAmount?: number }) => void;
+}) {
+  if (!row.defaultRef || !onLocate) return null;
+  return <button type="button" onClick={() => onLocate(row)} title="اعرض أماكن وجود هذه الحركة"
+    className="rounded border border-indigo-200 bg-indigo-50 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-indigo-700 hover:bg-indigo-100">
+    {row.defaultRef}
+  </button>;
 }
 
 function formatAmount(amount: number): string {
@@ -178,6 +191,8 @@ export function SplitTool({
   unavailableCashierKeys,
   onSave,
   onDelete,
+  onReview,
+  onOpenReference,
   onBack,
 }: {
   bankRows: ToolBankRow[];
@@ -187,6 +202,8 @@ export function SplitTool({
   unavailableCashierKeys: Set<string>;
   onSave: (split: BankSplit) => boolean;
   onDelete: (split: BankSplit) => void;
+  onReview?: (cashier?: ToolCashierRow, bank?: ToolBankRow, detail?: string) => void;
+  onOpenReference?: (row: { id: number; _fileSessionId?: number; defaultRef?: string; rawAmount?: number }) => void;
   onBack: () => void;
 }) {
   const availableBanks = bankRows.filter(row =>
@@ -204,12 +221,12 @@ export function SplitTool({
   const pickerPageSize = 50;
   const selectedBank = availableBanks.find(row => sourceKey(row) === selectedBankKey) ?? null;
   const bankOptions = availableBanks.filter(row => matchesSearch(
-    [row.date, row.description, row.accountType, row.rawAmount, formatAmount(row.rawAmount)],
+    [row.date, row.description, row.accountType, row.defaultRef, row.rawAmount, formatAmount(row.rawAmount)],
     bankSearch,
   ));
   const cashierOptions = availableCashiers.filter(row => {
     return (!selectedBank || row.type === selectedBank.type) &&
-      matchesSearch([row.date, row.name, row.rawName, row.ref, row.accountType, row.matchAmount, formatAmount(row.matchAmount)], cashierSearch);
+      matchesSearch([row.date, row.name, row.rawName, row.ref, row.defaultRef, row.accountType, row.matchAmount, formatAmount(row.matchAmount)], cashierSearch);
   });
   const visibleBanks = bankOptions.slice((bankPage - 1) * pickerPageSize, bankPage * pickerPageSize);
   const visibleCashiers = cashierOptions.slice((cashierPage - 1) * pickerPageSize, cashierPage * pickerPageSize);
@@ -295,8 +312,8 @@ export function SplitTool({
           {availableBanks.length > 0 && <p className="-mt-3 text-[11px] text-muted-foreground">الحركات المتاحة: {availableBanks.length}. اضغط للاختيار والبحث بالاسم أو التاريخ أو المبلغ.</p>}
           {availableBanks.length === 0 && <p className="-mt-3 text-[11px] text-amber-700">لا توجد حوالات متاحة للتجزئة في الكشف الحالي.</p>}
           {selectedBank && (
-            <div className="rounded-xl border border-blue-200 bg-blue-50 p-3 text-sm text-blue-950">
-              <div className="font-semibold">{selectedBank.description}</div>
+            <div data-default-reference={selectedBank.defaultRef} className="rounded-xl border border-blue-200 bg-blue-50 p-3 text-sm text-blue-950">
+              <div className="flex flex-wrap items-center gap-2 font-semibold">{selectedBank.description} <ReferenceButton row={selectedBank} onLocate={onOpenReference} /></div>
               <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-xs">
                 <span>{selectedBank.date || "بلا تاريخ"}</span>
                 <span>الأصل: {formatAmount(selectedBank.rawAmount)}</span>
@@ -363,18 +380,22 @@ export function SplitTool({
           <div className="flex items-center gap-2"><WalletCards className="h-5 w-5 text-blue-600" /><h2 className="font-semibold">التجزئات المحفوظة</h2></div>
           {!splits.length && <p className="rounded-xl bg-muted/40 p-4 text-sm text-muted-foreground">لم تُجزّأ أي حوالة بعد.</p>}
           {splits.map(split => (
-            <article key={split.id} className="space-y-2 rounded-xl border p-3">
+            <article key={split.id} data-default-reference={bankRows.find(row => row.id === split.bankId && (row._fileSessionId ?? 0) === split.bankSessionId)?.defaultRef}
+              className="space-y-2 rounded-xl border p-3">
               <div className="flex items-start justify-between gap-2">
-                <div><p className="font-semibold">{split.description}</p><p className="mt-1 text-xs text-muted-foreground">{split.date || "بلا تاريخ"} · الأصل {formatAmount(split.originalAmount)}</p></div>
+                <div><p className="font-semibold">{split.description}</p><p className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">{split.date || "بلا تاريخ"} · الأصل {formatAmount(split.originalAmount)} <ReferenceButton row={bankRows.find(row => row.id === split.bankId && (row._fileSessionId ?? 0) === split.bankSessionId) ?? { id: split.bankId, _fileSessionId: split.bankSessionId }} onLocate={onOpenReference} /></p></div>
                 <button type="button" onClick={() => onDelete(split)} className="rounded-lg p-1.5 text-red-600 hover:bg-red-50" title="إلغاء التجزئة"><Trash2 className="h-4 w-4" /></button>
               </div>
               <div className="space-y-1.5">
-                {split.allocations.map((allocation, index) => (
-                  <div key={allocation.id} className="flex flex-wrap justify-between gap-2 rounded-lg bg-muted/40 px-3 py-2 text-xs">
-                    <span>{index + 1}. {allocation.kind === "company" ? "حصة شركتكم · مرتبطة بفاتورة" : `حصة خارجية · ${allocation.note}`}</span>
+                {split.allocations.map((allocation, index) => {
+                  const row = allocation.kind === "company" && allocation.cashierId != null
+                    ? cashierRows.find(candidate => candidate.id === allocation.cashierId && (candidate._fileSessionId ?? 0) === (allocation.cashierSessionId ?? 0))
+                    : undefined;
+                  return <div key={allocation.id} data-default-reference={row?.defaultRef} className="flex flex-wrap justify-between gap-2 rounded-lg bg-muted/40 px-3 py-2 text-xs">
+                    <span className="flex flex-wrap items-center gap-2">{index + 1}. {allocation.kind === "company" ? "حصة شركتكم · مرتبطة بفاتورة" : `حصة خارجية · ${allocation.note}`} {row && <ReferenceButton row={row} onLocate={onOpenReference} />}</span>
                     <b className="font-mono">{formatAmount(allocation.amount)}</b>
-                  </div>
-                ))}
+                  </div>;
+                })}
               </div>
             </article>
           ))}
@@ -406,23 +427,26 @@ export function SplitTool({
               <div className="overflow-x-auto rounded-xl border">
                 <table className="w-full min-w-[720px] text-sm">
                   <thead className="sticky top-0 bg-muted text-xs"><tr>
-                    <th className="px-3 py-3 text-right">التاريخ</th><th className="px-3 py-3 text-right">البيان / اسم السند</th><th className="px-3 py-3 text-right">المرجع</th><th className="px-3 py-3 text-right">الحساب</th><th className="px-3 py-3 text-right">الاتجاه</th><th className="px-3 py-3 text-right">المبلغ</th><th className="px-3 py-3 text-center">اختيار</th>
+                    <th className="px-3 py-3 text-right">التاريخ</th><th className="px-3 py-3 text-right">البيان / اسم السند</th><th className="px-3 py-3 text-right">المرجع</th><th className="px-3 py-3 text-right">الحساب</th><th className="px-3 py-3 text-right">الاتجاه</th><th className="px-3 py-3 text-right">المبلغ</th><th className="px-3 py-3 text-center">مراجعة / اختيار</th>
                   </tr></thead>
                   <tbody>
-                    {bankPickerOpen ? visibleBanks.map(row => <tr key={sourceKey(row)} className="border-t hover:bg-muted/30">
-                      <td className="px-3 py-2.5">{row.date || "—"}</td><td className="px-3 py-2.5 font-medium">{row.description || "حركة بلا بيان"}</td><td className="px-3 py-2.5">—</td><td className="px-3 py-2.5 text-xs text-muted-foreground">{row.accountType || "—"}</td><td className="px-3 py-2.5">{row.type}</td><td className="px-3 py-2.5 font-mono">{formatAmount(row.rawAmount)}</td>
-                      <td className="px-3 py-2.5 text-center"><button type="button" onClick={() => {
+                    {bankPickerOpen ? visibleBanks.map(row => <tr key={sourceKey(row)} data-default-reference={row.defaultRef} className="border-t hover:bg-muted/30">
+                      <td className="px-3 py-2.5">{row.date || "—"}</td><td className="px-3 py-2.5 font-medium">{row.description || "حركة بلا بيان"} <ReferenceButton row={row} onLocate={onOpenReference} /></td><td className="px-3 py-2.5">—</td><td className="px-3 py-2.5 text-xs text-muted-foreground">{row.accountType || "—"}</td><td className="px-3 py-2.5">{row.type}</td><td className="px-3 py-2.5 font-mono">{formatAmount(row.rawAmount)}</td>
+                      <td className="px-3 py-2.5 text-center"><div className="inline-flex items-center gap-1"><button type="button" onClick={() => onReview?.(undefined, row, "حوالة من أداة التجزئة")} title="إضافة الحوالة للمراجعة" aria-label="مراجعة الحوالة" className="rounded-lg border p-1.5 text-amber-700 hover:bg-amber-50"><Star className="h-4 w-4" /></button><button type="button" onClick={() => {
                         setSelectedBankKey(sourceKey(row));
                         setParts([{ id: `part-${Date.now()}`, amount: "", kind: "company", cashierKey: "", note: "" }]);
                         setFormError("");
                         setBankPickerOpen(false);
-                      }} className="rounded-lg bg-primary px-3 py-1.5 text-xs font-semibold text-primary-foreground hover:opacity-90">اختيار</button></td>
-                    </tr>) : visibleCashiers.map(row => <tr key={sourceKey(row)} className="border-t hover:bg-muted/30">
-                      <td className="px-3 py-2.5">{row.date || "—"}</td><td className="px-3 py-2.5 font-medium">{row.name || row.rawName || "سند بلا اسم"}</td><td className="px-3 py-2.5">{row.ref || "—"}</td><td className="px-3 py-2.5 text-xs text-muted-foreground">{row.accountType || "—"}</td><td className="px-3 py-2.5">{row.type}</td><td className="px-3 py-2.5 font-mono">{formatAmount(row.matchAmount)}</td>
-                      <td className="px-3 py-2.5 text-center"><button type="button" onClick={() => {
+                      }} className="rounded-lg bg-primary px-3 py-1.5 text-xs font-semibold text-primary-foreground hover:opacity-90">اختيار</button></div></td>
+                    </tr>) : visibleCashiers.map(row => <tr key={sourceKey(row)} data-default-reference={row.defaultRef} className="border-t hover:bg-muted/30">
+                      <td className="px-3 py-2.5">{row.date || "—"}</td><td className="px-3 py-2.5 font-medium">{row.name || row.rawName || "سند بلا اسم"} <ReferenceButton row={row} onLocate={onOpenReference} /></td><td className="px-3 py-2.5">{row.ref || "—"}</td><td className="px-3 py-2.5 text-xs text-muted-foreground">{row.accountType || "—"}</td><td className="px-3 py-2.5">{row.type}</td><td className="px-3 py-2.5 font-mono">{formatAmount(row.matchAmount)}</td>
+                      <td className="px-3 py-2.5 text-center"><div className="inline-flex items-center gap-1"><button type="button" onClick={() => {
+                        const bank = selectedBank;
+                        onReview?.(row, bank ?? undefined, bank ? "فاتورة وحوالة مرشحتان للتجزئة" : "فاتورة من أداة التجزئة");
+                      }} title="إضافة الفاتورة للمراجعة" aria-label="مراجعة الفاتورة" className="rounded-lg border p-1.5 text-amber-700 hover:bg-amber-50"><Star className="h-4 w-4" /></button><button type="button" onClick={() => {
                         if (cashierPickerPartId) updatePart(cashierPickerPartId, { cashierKey: sourceKey(row) });
                         setCashierPickerPartId(null);
-                      }} className="rounded-lg bg-primary px-3 py-1.5 text-xs font-semibold text-primary-foreground hover:opacity-90">اختيار</button></td>
+                      }} className="rounded-lg bg-primary px-3 py-1.5 text-xs font-semibold text-primary-foreground hover:opacity-90">اختيار</button></div></td>
                     </tr>)}
                     {((bankPickerOpen && !visibleBanks.length) || (cashierPickerPartId && !visibleCashiers.length)) && <tr><td colSpan={7} className="py-12 text-center text-sm text-muted-foreground">لا توجد نتائج مطابقة لبحثك.</td></tr>}
                   </tbody>
@@ -449,6 +473,8 @@ export function ClearingTool({
   unavailableCashierKeys,
   onSave,
   onDelete,
+  onReview,
+  onOpenReference,
   onBack,
 }: {
   cashierRows: ToolCashierRow[];
@@ -456,6 +482,8 @@ export function ClearingTool({
   unavailableCashierKeys: Set<string>;
   onSave: (group: ClearingGroup) => boolean;
   onDelete: (group: ClearingGroup) => void;
+  onReview?: (cashier?: ToolCashierRow, detail?: string) => void;
+  onOpenReference?: (row: { id: number; _fileSessionId?: number; defaultRef?: string; rawAmount?: number }) => void;
   onBack: () => void;
 }) {
   const [debitSearch, setDebitSearch] = useState("");
@@ -529,19 +557,21 @@ export function ClearingTool({
           <th className="px-3 py-2 text-right">السند / البيان</th>
           <th className="px-3 py-2 text-right">الحساب</th>
           <th className="px-3 py-2 text-right">المبلغ</th>
+          <th className="px-3 py-2 text-center">مراجعة</th>
         </tr></thead>
         <tbody>
           {rows.map(row => {
             const key = sourceKey(row);
-            return <tr key={key} className="border-t hover:bg-muted/30">
+            return <tr key={key} data-default-reference={row.defaultRef} className="border-t hover:bg-muted/30">
               <td className="px-3 py-2 text-center"><input type="checkbox" checked={selected.has(key)} onChange={event => toggleRow(key, event.target.checked, side)} /></td>
               <td className="px-3 py-2">{row.date || "—"}</td>
-              <td className="px-3 py-2"><span className="font-medium">{row.name}</span>{row.ref && <span className="mr-2 text-xs text-muted-foreground">#{row.ref}</span>}</td>
+              <td className="px-3 py-2"><span className="font-medium">{row.name}</span>{row.ref && <span className="mr-2 text-xs text-muted-foreground">#{row.ref}</span>} <ReferenceButton row={row} onLocate={onOpenReference} /></td>
               <td className="px-3 py-2 text-xs text-muted-foreground">{row.accountType || "—"}</td>
               <td className="px-3 py-2 font-mono">{formatAmount(side === "debit" ? row.debit : row.credit)}</td>
+              <td className="px-3 py-2 text-center"><button type="button" onClick={() => onReview?.(row, `حركة من شاشة تسكير السندات · ${side === "debit" ? "مدين" : "دائن"}`)} title="إضافة الحركة إلى المراجعة" aria-label={`مراجعة ${row.name}`} className="rounded-lg border p-1.5 text-amber-700 hover:bg-amber-50"><Star className="h-4 w-4" /></button></td>
             </tr>;
           })}
-          {!rows.length && <tr><td colSpan={5} className="py-8 text-center text-xs text-muted-foreground">لا توجد حركات متاحة في هذه القائمة.</td></tr>}
+          {!rows.length && <tr><td colSpan={6} className="py-8 text-center text-xs text-muted-foreground">لا توجد حركات متاحة في هذه القائمة.</td></tr>}
         </tbody>
       </table>
     </div>
@@ -603,7 +633,7 @@ export function ClearingTool({
               <div className="grid gap-2 md:grid-cols-2">
                 {[{ label: "مدين", rows: debits }, { label: "دائن", rows: credits }].map(side => <div key={side.label} className="space-y-1">
                   <p className="text-xs font-semibold">{side.label}</p>
-                  {side.rows.map(row => <div key={sourceKey(row)} className="flex justify-between gap-2 rounded bg-muted/40 px-2 py-1.5 text-xs"><span>{row.date} · {row.name}</span><b className="font-mono">{formatAmount(side.label === "مدين" ? row.debit : row.credit)}</b></div>)}
+                  {side.rows.map(row => <div key={sourceKey(row)} data-default-reference={row.defaultRef} className="flex justify-between gap-2 rounded bg-muted/40 px-2 py-1.5 text-xs"><span>{row.date} · {row.name} <ReferenceButton row={row} onLocate={onOpenReference} /></span><b className="font-mono">{formatAmount(side.label === "مدين" ? row.debit : row.credit)}</b></div>)}
                 </div>)}
               </div>
               {group.note && <p className="text-xs text-muted-foreground">{group.note}</p>}
@@ -621,6 +651,8 @@ export function BatchCutoffTool({
   unavailableCashierKeys,
   onSave,
   onDelete,
+  onReview,
+  onOpenReference,
   onBack,
 }: {
   cashierRows: ToolCashierRow[];
@@ -628,6 +660,8 @@ export function BatchCutoffTool({
   unavailableCashierKeys: Set<string>;
   onSave: (batch: CutoffBatch) => boolean;
   onDelete: (batch: CutoffBatch) => void;
+  onReview?: (cashier?: ToolCashierRow, detail?: string) => void;
+  onOpenReference?: (row: { id: number; _fileSessionId?: number; defaultRef?: string; rawAmount?: number }) => void;
   onBack: () => void;
 }) {
   const [dateFrom, setDateFrom] = useState(todayIso);
@@ -645,7 +679,7 @@ export function BatchCutoffTool({
   const [formError, setFormError] = useState("");
   const aggregates = cashierRows.filter(row => !unavailableCashierKeys.has(sourceKey(row)));
   const aggregateOptions = aggregates.filter(row => matchesSearch(
-    [row.date, row.name, row.rawName, row.ref, row.accountType, row.type, row.matchAmount, formatAmount(row.matchAmount)],
+    [row.date, row.name, row.rawName, row.ref, row.defaultRef, row.accountType, row.type, row.matchAmount, formatAmount(row.matchAmount)],
     aggregateSearch,
   ));
   const aggregatePageSize = 50;
@@ -665,7 +699,7 @@ export function BatchCutoffTool({
     })
     .sort((a, b) => (toIsoDate(a.date) || "").localeCompare(toIsoDate(b.date) || "") || a.name.localeCompare(b.name)),
   [cashierRows, unavailableCashierKeys, aggregate, aggregateKey, lowerDate, upperDate, canSelectPeriod]);
-  const candidates = allCandidates.filter(row => !candidateSearch.trim() || `${row.date} ${row.name} ${row.rawName} ${row.ref} ${row.matchAmount}`.toLowerCase().includes(candidateSearch.trim().toLowerCase()));
+  const candidates = allCandidates.filter(row => !candidateSearch.trim() || `${row.date} ${row.name} ${row.rawName} ${row.ref} ${row.defaultRef ?? ""} ${row.matchAmount}`.toLowerCase().includes(candidateSearch.trim().toLowerCase()));
   const selectedRows = allCandidates.filter(row => selectedKeys.has(sourceKey(row)));
   const pageSize = 100;
   const pageCount = Math.max(1, Math.ceil(candidates.length / pageSize));
@@ -762,14 +796,14 @@ export function BatchCutoffTool({
           <div className="overflow-x-auto rounded-xl border">
             <table className="w-full min-w-[650px] text-sm">
               <thead className="bg-muted text-xs"><tr>
-                <th className="w-10 px-3 py-2 text-center">تحديد</th><th className="px-3 py-2 text-right">التاريخ</th><th className="px-3 py-2 text-right">الفاتورة</th><th className="px-3 py-2 text-right">القيمة</th><th className="px-3 py-2 text-right">مصدر التاريخ</th>
+                <th className="w-10 px-3 py-2 text-center">تحديد</th><th className="px-3 py-2 text-right">التاريخ</th><th className="px-3 py-2 text-right">الفاتورة</th><th className="px-3 py-2 text-right">القيمة</th><th className="px-3 py-2 text-right">مصدر التاريخ</th><th className="px-3 py-2 text-center">مراجعة</th>
               </tr></thead>
               <tbody>
                 {visibleCandidates.map(row => {
                   const key = sourceKey(row);
                   const date = toIsoDate(row.date);
                   const inChosenPeriod = !!date && date >= dateFrom && date <= dateTo;
-                  return <tr key={key} className="border-t hover:bg-muted/30">
+                  return <tr key={key} data-default-reference={row.defaultRef} className="border-t hover:bg-muted/30">
                     <td className="px-3 py-2 text-center"><input type="checkbox" checked={selectedKeys.has(key)} onChange={event => {
                       setSelectionTouched(true);
                       setSelectedKeys(current => {
@@ -779,12 +813,13 @@ export function BatchCutoffTool({
                       });
                     }} /></td>
                     <td className="px-3 py-2">{row.date || "—"}</td>
-                    <td className="px-3 py-2"><span className="font-medium">{row.name}</span>{row.ref && <span className="mr-2 text-[10px] text-muted-foreground">#{row.ref}</span>}</td>
+                    <td className="px-3 py-2"><span className="font-medium">{row.name}</span>{row.ref && <span className="mr-2 text-[10px] text-muted-foreground">#{row.ref}</span>} <ReferenceButton row={row} onLocate={onOpenReference} /></td>
                     <td className="px-3 py-2 font-mono">{formatAmount(row.matchAmount)}</td>
                     <td className="px-3 py-2 text-xs">{inChosenPeriod ? <span className="text-green-700">ضمن الفترة</span> : <span className="text-amber-700">ضمن نافذة التداخل</span>}</td>
+                    <td className="px-3 py-2 text-center"><button type="button" onClick={() => onReview?.(row, aggregate ? `مجموعة مراجعة مع سند الإجمالي: ${aggregate.name}` : "فاتورة من أداة تجميع فترة التعطل")} title="إضافة الفاتورة إلى المراجعة" aria-label={`مراجعة ${row.name}`} className="rounded-lg border p-1.5 text-amber-700 hover:bg-amber-50"><Star className="h-4 w-4" /></button></td>
                   </tr>;
                 })}
-                {!candidates.length && <tr><td colSpan={5} className="py-8 text-center text-xs text-muted-foreground">لا توجد فواتير متاحة للفترة المحددة والاتجاه المختار.</td></tr>}
+                {!candidates.length && <tr><td colSpan={6} className="py-8 text-center text-xs text-muted-foreground">لا توجد فواتير متاحة للفترة المحددة والاتجاه المختار.</td></tr>}
               </tbody>
             </table>
           </div>
@@ -813,14 +848,14 @@ export function BatchCutoffTool({
           {batches.map(batch => {
             const aggregateRow = cashierRows.find(row => row.id === batch.aggregateId && (row._fileSessionId ?? 0) === batch.aggregateSessionId);
             const details = batch.sourceRows.map(ref => cashierRows.find(row => row.id === ref.id && (row._fileSessionId ?? 0) === ref.sessionId)).filter(Boolean);
-            return <article key={batch.id} className="space-y-2 rounded-xl border p-3">
+            return <article key={batch.id} data-default-reference={[aggregateRow?.defaultRef, ...details.map(row => row?.defaultRef)].filter(Boolean).join("|")} className="space-y-2 rounded-xl border p-3">
               <div className="flex items-start justify-between gap-2">
-                <div><p className="font-semibold">{aggregateRow?.name || "سند إجمالي"}</p><p className="mt-1 text-xs text-muted-foreground">{batch.dateFrom} إلى {batch.dateTo} · {details.length} فاتورة · {formatAmount(batch.total)}</p></div>
+                <div><p className="font-semibold">{aggregateRow?.name || "سند إجمالي"} {aggregateRow && <ReferenceButton row={aggregateRow} onLocate={onOpenReference} />}</p><p className="mt-1 text-xs text-muted-foreground">{batch.dateFrom} إلى {batch.dateTo} · {details.length} فاتورة · {formatAmount(batch.total)}</p></div>
                 <button type="button" onClick={() => onDelete(batch)} className="rounded-lg p-1.5 text-red-600 hover:bg-red-50" title="إلغاء المجموعة"><Trash2 className="h-4 w-4" /></button>
               </div>
               <p className="text-xs text-muted-foreground">{batch.graceDays ? `نافذة تداخل ±${batch.graceDays} يوم` : "دون نافذة تداخل"}{batch.note ? ` · ${batch.note}` : ""}</p>
               <div className="max-h-36 space-y-1 overflow-auto">
-                {details.map((row, index) => row && <div key={`${row._fileSessionId ?? 0}:${row.id}`} className="flex justify-between gap-2 rounded bg-muted/40 px-2 py-1.5 text-xs"><span>{index + 1}. {row.date} · {row.name}</span><b className="font-mono">{formatAmount(row.matchAmount)}</b></div>)}
+                {details.map((row, index) => row && <div key={`${row._fileSessionId ?? 0}:${row.id}`} data-default-reference={row.defaultRef} className="flex justify-between gap-2 rounded bg-muted/40 px-2 py-1.5 text-xs"><span>{index + 1}. {row.date} · {row.name} <ReferenceButton row={row} onLocate={onOpenReference} /></span><b className="font-mono">{formatAmount(row.matchAmount)}</b></div>)}
               </div>
             </article>;
           })}
@@ -849,19 +884,19 @@ export function BatchCutoffTool({
               <div className="overflow-x-auto rounded-xl border">
                 <table className="w-full min-w-[780px] text-sm">
                   <thead className="sticky top-0 bg-muted text-xs"><tr>
-                    <th className="px-3 py-3 text-right">التاريخ</th><th className="px-3 py-3 text-right">البيان / اسم السند</th><th className="px-3 py-3 text-right">المرجع</th><th className="px-3 py-3 text-right">الحساب</th><th className="px-3 py-3 text-right">الاتجاه</th><th className="px-3 py-3 text-right">المبلغ</th><th className="px-3 py-3 text-center">اختيار</th>
+                    <th className="px-3 py-3 text-right">التاريخ</th><th className="px-3 py-3 text-right">البيان / اسم السند</th><th className="px-3 py-3 text-right">المرجع</th><th className="px-3 py-3 text-right">الحساب</th><th className="px-3 py-3 text-right">الاتجاه</th><th className="px-3 py-3 text-right">المبلغ</th><th className="px-3 py-3 text-center">مراجعة / اختيار</th>
                   </tr></thead>
                   <tbody>
-                    {visibleAggregates.map(row => <tr key={sourceKey(row)} className="border-t hover:bg-muted/30">
-                      <td className="px-3 py-2.5">{row.date || "—"}</td><td className="px-3 py-2.5 font-medium">{row.name || row.rawName || "سند بلا اسم"}</td><td className="px-3 py-2.5">{row.ref || "—"}</td><td className="px-3 py-2.5 text-xs text-muted-foreground">{row.accountType || "—"}</td><td className="px-3 py-2.5">{row.type}</td><td className="px-3 py-2.5 font-mono">{formatAmount(row.matchAmount)}</td>
-                      <td className="px-3 py-2.5 text-center"><button type="button" onClick={() => {
+                    {visibleAggregates.map(row => <tr key={sourceKey(row)} data-default-reference={row.defaultRef} className="border-t hover:bg-muted/30">
+                      <td className="px-3 py-2.5">{row.date || "—"}</td><td className="px-3 py-2.5 font-medium">{row.name || row.rawName || "سند بلا اسم"} <ReferenceButton row={row} onLocate={onOpenReference} /></td><td className="px-3 py-2.5">{row.ref || "—"}</td><td className="px-3 py-2.5 text-xs text-muted-foreground">{row.accountType || "—"}</td><td className="px-3 py-2.5">{row.type}</td><td className="px-3 py-2.5 font-mono">{formatAmount(row.matchAmount)}</td>
+                      <td className="px-3 py-2.5 text-center"><div className="inline-flex items-center gap-1"><button type="button" onClick={() => onReview?.(row, "سند إجمالي من أداة تجميع فترة التعطل")} title="إضافة سند الإجمالي إلى المراجعة" aria-label={`مراجعة ${row.name}`} className="rounded-lg border p-1.5 text-amber-700 hover:bg-amber-50"><Star className="h-4 w-4" /></button><button type="button" onClick={() => {
                         setAggregateKey(sourceKey(row));
                         setSelectedKeys(new Set());
                         setSelectionTouched(false);
                         setCandidatePage(1);
                         setFormError("");
                         setAggregatePickerOpen(false);
-                      }} className="rounded-lg bg-primary px-3 py-1.5 text-xs font-semibold text-primary-foreground hover:opacity-90">اختيار</button></td>
+                      }} className="rounded-lg bg-primary px-3 py-1.5 text-xs font-semibold text-primary-foreground hover:opacity-90">اختيار</button></div></td>
                     </tr>)}
                     {!visibleAggregates.length && <tr><td colSpan={7} className="py-8 text-center text-xs text-muted-foreground">لا توجد حركات متاحة تطابق البحث.</td></tr>}
                   </tbody>

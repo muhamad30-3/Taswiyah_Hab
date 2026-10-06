@@ -1,13 +1,15 @@
 "use client"
 
-import { User, Settings, Scale, LogOut, ChevronLeft, Sparkles, Link2, BarChart3, FileSpreadsheet, Split, CalendarRange, ListChecks } from "lucide-react"
+import { User, Settings, Scale, LogOut, ChevronLeft, Sparkles, Link2, BarChart3, FileSpreadsheet, Split, CalendarRange, ListChecks, Home, BookOpen, ScanText, FolderOpen, UserCog } from "lucide-react"
 
-export type ViewId = "recon" | "assistant" | "manual" | "report" | "splitTool" | "batchCutoff" | "clearing" | "processor" | "profile" | "settings"
+export type ViewId = "home" | "documentStudio" | "recon" | "assistant" | "manual" | "report" | "splitTool" | "batchCutoff" | "clearing" | "processor" | "guide" | "files" | "adminUsers" | "profile" | "settings"
 
 export function AppSidebar({
   active,
   onNavigate,
   username,
+  isAdmin,
+  centralStorage,
   onLogout,
   collapsed,
   onToggleCollapse,
@@ -15,11 +17,15 @@ export function AppSidebar({
   active: ViewId
   onNavigate: (view: ViewId) => void
   username: string
+  isAdmin: boolean
+  centralStorage: boolean
   onLogout: () => void
   collapsed: boolean
   onToggleCollapse: () => void
 }) {
   const navItems: { id: ViewId; label: string; icon: typeof User }[] = [
+    { id: "home", label: "الصفحة الرئيسية", icon: Home },
+    { id: "documentStudio", label: "المستندات الذكية", icon: ScanText },
     { id: "recon", label: "أدوات التسوية", icon: Scale },
     { id: "assistant", label: "مساعد المطابقة", icon: Sparkles },
     { id: "manual", label: "المطابقة اليدوية", icon: Link2 },
@@ -28,6 +34,9 @@ export function AppSidebar({
     { id: "batchCutoff", label: "أداة تجميع فترة التعطل", icon: CalendarRange },
     { id: "clearing", label: "شاشة تسكير السندات", icon: ListChecks },
     { id: "processor", label: "معالج كشوفات الحسابات", icon: FileSpreadsheet },
+    ...(centralStorage ? [{ id: "files" as const, label: "ملفاتي", icon: FolderOpen }] : []),
+    ...(centralStorage && isAdmin ? [{ id: "adminUsers" as const, label: "إدارة المستخدمين", icon: UserCog }] : []),
+    { id: "guide", label: "دليل المستخدم", icon: BookOpen },
     { id: "profile", label: "الملف الشخصي", icon: User },
     { id: "settings", label: "الإعدادات", icon: Settings },
   ]

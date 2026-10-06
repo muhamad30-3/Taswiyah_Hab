@@ -139,7 +139,7 @@ export function SafetyLockOverlay({
         </p>
         {lastAttempt && <p className="mt-3 rounded-md bg-rose-50 px-3 py-2 text-xs text-rose-800">آخر محاولة: {lastAttempt} · لم تُنفذ</p>}
         <form data-safety-unlock onSubmit={handleSubmit} className="mt-5 space-y-2">
-          <label htmlFor="safety-unlock-password" className="text-xs font-medium text-slate-700">كلمة مرور الحساب لفك القفل</label>
+          <label htmlFor="safety-unlock-password" className="text-xs font-medium text-slate-700">أدخل # ثم كلمة فك قفل الأمان</label>
           <input
             id="safety-unlock-password"
             type="password"
@@ -147,6 +147,7 @@ export function SafetyLockOverlay({
             autoFocus
             value={password}
             onChange={event => setPassword(event.target.value)}
+            placeholder="#كلمة فك القفل"
             className="w-full rounded-lg border border-slate-300 px-3 py-2.5 text-sm outline-none focus:border-rose-500 focus:ring-2 focus:ring-rose-100"
           />
           {error && <p role="alert" className="text-xs text-rose-700">{error}</p>}

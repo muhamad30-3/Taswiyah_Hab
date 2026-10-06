@@ -10,7 +10,21 @@ if (!process.env.DATABASE_URL) {
   );
 }
 
-export const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+export const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  connectionTimeoutMillis: 8_000,
+  idleTimeoutMillis: 30_000,
+  keepAlive: true,
+  keepAliveInitialDelayMillis: 10_000,
+  query_timeout: 60_000,
+  statement_timeout: 60_000,
+});
+
+pool.on("error", error => {
+  const errorCode = "code" in error && typeof error.code === "string" ? error.code : error.name;
+  console.error("Unexpected idle PostgreSQL connection error:", errorCode);
+});
+
 export const db = drizzle(pool, { schema });
 
 export * from "./schema";

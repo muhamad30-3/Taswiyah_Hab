@@ -58,13 +58,20 @@ function headerCandidateScore(row: StatementCell[]): number {
 }
 
 export function parseTabularRows(rows: StatementCell[][]): { headers: string[]; rows: StatementCell[][] } | null {
+  const nextNonEmptyRows = new Array<number>(rows.length).fill(-1)
+  let nextNonEmpty = -1
+  for (let index = rows.length - 1; index >= 0; index -= 1) {
+    nextNonEmptyRows[index] = nextNonEmpty
+    if (rows[index].some(hasValue)) nextNonEmpty = index
+  }
   let headerIndex = -1
   let bestScore = -1
   for (let index = 0; index < rows.length; index += 1) {
     const score = headerCandidateScore(rows[index])
     if (score < 0) continue
     const headerIndexes = rows[index].map((cell, column) => hasValue(cell) ? column : -1).filter((column) => column >= 0)
-    const nextData = rows.slice(index + 1).find((row) => row.some(hasValue))
+    const nextDataIndex = nextNonEmptyRows[index]
+    const nextData = nextDataIndex >= 0 ? rows[nextDataIndex] : undefined
     if (!nextData || !headerIndexes.some((column) => hasValue(nextData[column]))) continue
     if (score > bestScore) {
       bestScore = score

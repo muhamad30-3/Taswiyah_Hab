@@ -2,6 +2,8 @@
 /* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/no-unused-vars, no-constant-binary-expression */
 import React, { useState, useCallback, useMemo, useEffect, useRef } from "react";
 import * as XLSX from "xlsx";
+import { centralStorageEnabled, centralStorageGet, centralStorageSet, isCentralAdmin } from "../lib/central-storage";
+import { clearStageASourceFiles, saveStageASourceFiles } from "../lib/stage-a-source-files";
 import { cleanStatementText, removeStatementBalances, type StatementCell } from "../lib/account-statement-processor";
 import {
   Upload, FileSpreadsheet, Download, ChevronDown, X,
@@ -21,7 +23,12 @@ function readFileBuf(f: File): Promise<ArrayBuffer> {
 function parseSheet(buf: ArrayBuffer) {
   const wb = XLSX.read(buf, { type: "array", cellDates: true });
   const ws = wb.Sheets[wb.SheetNames[0]];
-  const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(ws, { defval: "" });
+  const preview = XLSX.utils.sheet_to_json<unknown[]>(ws, { header: 1, defval: "" });
+  const populatedCellCount = (row: unknown[] | undefined) => (row ?? []).filter(value => value !== "" && value != null).length;
+  const headerRow = populatedCellCount(preview[0]) > 1
+    ? 0
+    : preview.findIndex((row, index) => index > 0 && populatedCellCount(row) > 1);
+  const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(ws, { defval: "", range: headerRow > 0 ? headerRow : 0 });
   const headers = rows.length ? Object.keys(rows[0]) : [];
   const cleaned = removeStatementBalances(headers, rows.map(row => Object.fromEntries(
     Object.entries(row).map(([header, value]) => [header, cleanStatementText(value as StatementCell)])
@@ -83,6 +90,23 @@ async function idbSet(key: string, value: unknown): Promise<void> {
 }
 
 async function storageGet<T>(key: string, fallback: T): Promise<T> {
+  if (centralStorageEnabled) {
+    const remote = await centralStorageGet<T>(key);
+    if (remote !== undefined) return remote;
+    if (isCentralAdmin()) {
+      try {
+        const local = await idbGet<T>(key);
+        if (local !== undefined) {
+          await centralStorageSet(key, local);
+          return local;
+        }
+      } catch (error) {
+        console.error(`تعذرت ترقية بيانات «${key}» إلى قاعدة البيانات المركزية:`, error);
+        throw error;
+      }
+    }
+    return fallback;
+  }
   try {
     const w = window as any;
     if (w?.storage?.get) {
@@ -102,6 +126,14 @@ async function storageGet<T>(key: string, fallback: T): Promise<T> {
 }
 
 async function storageSet(key: string, value: unknown): Promise<void> {
+  if (centralStorageEnabled) {
+    try {
+      await centralStorageSet(key, value);
+    } catch (error) {
+      console.error(`تعذر حفظ «${key}» في قاعدة البيانات المركزية:`, error);
+    }
+    return;
+  }
   try {
     const w = window as any;
     if (w?.storage?.set) { await w.storage.set(key, JSON.stringify(value)); return; }
@@ -197,6 +229,12 @@ function extractVisaNumber(rawName: string): string | null {
   return m ? m[1] : null;
 }
 
+function isMerchantPurchaseBankDescription(value: string): boolean {
+  const description = value.normalize("NFKC").replace(/[\u064B-\u065F\u0670\u0640]/g, "").toLowerCase();
+  return (/مشتريات/.test(description) && /عمول/.test(description) && /تجار|بطاق/.test(description)) ||
+    /merchant.*(?:purchase|commission)|(?:purchase|commission).*merchant/.test(description);
+}
+
 // ─── Auto-detect columns ──────────────────────────────────────────────────────
 function autoDetect(headers: string[], hints: string[]): string {
   const scores=headers.map(h=>({h,s:hints.reduce((a,hint)=>a+(h.toLowerCase().includes(hint.toLowerCase())?1:0),0)})).sort((a,b)=>b.s-a.s);
@@ -216,6 +254,10 @@ const CARD_PAID_HINTS = ["مدفوع بالكارد", "مدفوع بالكرت",
 function detectCardPaidColumn(headers: string[]): string {
   const exact = headers.find(header => CARD_PAID_HINTS.some(hint => header.trim().toLowerCase() === hint.toLowerCase()));
   return exact || autoDetect(headers, CARD_PAID_HINTS);
+}
+
+function detectAuthorizationColumn(headers: string[]): string {
+  return autoDetect(headers, ["رقم التفويض", "authorization", "auth number", "auth no", "auth code", "approval code", "رقم الموافقة"]);
 }
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -281,8 +323,8 @@ interface PendingVisaBank {
 type R2Tab = "overview" | "bank" | "aza" | "sony" | "auth" | "matched" | "pendingBank" | "unmatched";
 
 // ─── DropZone ─────────────────────────────────────────────────────────────────
-function DropZone({ file, onFile, onClear }: { file:File|null; onFile:(f:File)=>void; onClear:()=>void }) {
-  const handleDrop=useCallback((e:React.DragEvent)=>{e.preventDefault();const f=e.dataTransfer.files[0];if(f)onFile(f);},[onFile]);
+function DropZone({ file, onFile, onFiles, multiple = false, onClear }: { file:File|null; onFile:(f:File)=>void; onFiles?:(files:File[])=>void; multiple?:boolean; onClear:()=>void }) {
+  const handleDrop=useCallback((e:React.DragEvent)=>{e.preventDefault();const files=Array.from(e.dataTransfer.files);if(files.length){if(onFiles)onFiles(files);else onFile(files[0]);}},[onFile,onFiles]);
   if (file) return (
     <div className="flex items-center justify-between gap-3 p-3.5 bg-blue-500/5 border border-blue-500/25 rounded-lg">
       <div className="flex items-center gap-2.5">
@@ -295,7 +337,7 @@ function DropZone({ file, onFile, onClear }: { file:File|null; onFile:(f:File)=>
   return (
     <label onDrop={handleDrop} onDragOver={e=>e.preventDefault()}
       className="flex flex-col items-center gap-2 p-6 border-2 border-dashed border-border rounded-lg cursor-pointer hover:border-blue-500/50 hover:bg-muted/10 transition-all">
-      <input type="file" accept=".xlsx,.xls,.csv" className="hidden" onChange={e=>{const f=e.target.files?.[0];if(f)onFile(f);}}/>
+      <input type="file" multiple={multiple} accept=".xlsx,.xls,.csv" className="hidden" onChange={e=>{const files=Array.from(e.target.files ?? []);if(files.length){if(onFiles)onFiles(files);else onFile(files[0]);}e.currentTarget.value="";}}/>
       <Upload className="w-6 h-6 text-muted-foreground"/>
       <span className="text-sm">اسحب الملف أو انقر هنا</span>
       <span className="text-xs text-muted-foreground">xlsx · xls · csv</span>
@@ -327,7 +369,14 @@ export interface StageAResult {
   amount: number;
   databaseName: string;
   databaseAmount: number;
+  invoiceTotal: number;
+  cashAmount: number;
+  checkAmount: number;
+  debtAmount: number;
+  discountAmount: number;
+  type: "مدفوع" | "مستلم";
   userId: string;
+  invoiceDate: string;
   registrationTime: string;
   customerNumber: string;
   invoiceNumber: string;
@@ -335,32 +384,80 @@ export interface StageAResult {
   invoice: Record<string, unknown>;
   matched: boolean;
   issue: string;
-  category: "بنك فلسطين" | "محفظة تجارية" | "محفظة محمود" | "محفظة" | "جوال بي" | "فيزا";
+  category: string;
   categoryIssue: string;
+}
+
+export interface StageASummary {
+  databaseInvoiceCount: number;
+  databaseInvoiceTotal: number;
+  databaseCashTotal: number;
+  databaseDebtTotal: number;
+  databaseCardTotal: number;
+  databaseDiscountTotal?: number;
+  databaseInvoices?: StageADatabaseInvoice[];
+}
+
+export interface StageADatabaseInvoice {
+  invoiceNumber: string;
+  invoiceDate: string;
+  registrationTime: string;
+  name: string;
+  customerNumber: string;
+  userId: string;
+  invoiceTotal: number;
+  cashAmount: number;
+  checkAmount: number;
+  cardAmount: number;
+  debtAmount: number;
+  discountAmount: number;
+}
+
+interface StageAInvoiceFileSnapshot {
+  fileName: string;
+  fileCount: number;
+  headers: string[];
+  rows: Record<string, unknown>[];
+  map: { name: string; paidAmount: string; receivedAmount: string; accountType: string; date: string; registrationTime: string; reference: string; userId: string };
+  swap: boolean;
 }
 
 function cleanStageAName(value: string): string {
   return String(cleanStatementText(value) ?? "").trim();
 }
 
+function stageAEnglishDate(value: unknown): string {
+  const text = String(value ?? "").normalize("NFKC")
+    .replace(/[٠-٩]/g, digit => String("٠١٢٣٤٥٦٧٨٩".indexOf(digit)))
+    .replace(/[۰-۹]/g, digit => String("۰۱۲۳۴۵۶۷۸۹".indexOf(digit)))
+    .replace(/[\u200e\u200f\u202a-\u202e]/g, "").trim();
+  const parts = text.match(/^(\d{1,4})[./-](\d{1,2})[./-](\d{1,4})/);
+  if (!parts) return text;
+  const [, first, second, third] = parts;
+  if (first.length === 4) return `${third.padStart(2, "0")}/${second.padStart(2, "0")}/${first}`;
+  return `${first.padStart(2, "0")}/${second.padStart(2, "0")}/${third}`;
+}
+
 function stageANameKey(value: string): string {
   return normName(cleanStageAName(value)).split(" ").filter(token => /^[a-z]+$/.test(token)).sort().join(" ");
 }
 
-function classifyStageAInvoice(originalName: string, source: string): { category: "بنك فلسطين" | "محفظة تجارية" | "محفظة محمود" | "محفظة" | "جوال بي" | "فيزا"; categoryIssue: string } {
-  const hasVisaNumber = /(?:^|[^\d])\d{4}(?:$|[^\d])/.test(originalName);
+function classifyStageAInvoice(originalName: string, source: string): { category: string; categoryIssue: string } {
   const normalized = originalName.toLowerCase().replace(/[ـ_-]/g, " ").replace(/\s+/g, " ").trim();
-  const jawwalPay = /جوال\s*بي+|jawwal\s*pay|jawwalpay/i.test(normalized);
+  const isJawwalSource = /جوال\s*بي+|jawwal\s*pay|jawwalpay/i.test(source);
+  const jawwalPay = isJawwalSource || /جوال\s*بي+|jawwal\s*pay|jawwalpay/i.test(normalized);
+  if (jawwalPay) return { category: "جوال بي", categoryIssue: "" };
+  const hasVisaNumber = /(?:^|[^\d])\d{4}(?:$|[^\d])/.test(originalName);
   const walletWords = ["محفظة", "wallet"];
   const isWallet = walletWords.some(word => normalized.includes(word));
   if (hasVisaNumber) {
     return { category: "فيزا", categoryIssue: isWallet || source === "محفظة تجارية" ? "مسجلة في ملف المحفظة، لكن رقم 4 أرقام يدل على فيزا" : "" };
   }
-  if (jawwalPay) return { category: "جوال بي", categoryIssue: "" };
-  if (normalized.includes("محمود") && isWallet) return { category: "محفظة محمود", categoryIssue: "" };
-  if (isWallet) return { category: "محفظة", categoryIssue: "" };
-  if (source === "بنك فلسطين") return { category: "بنك فلسطين", categoryIssue: "" };
-  if (source === "محفظة تجارية") return { category: "محفظة تجارية", categoryIssue: "" };
+  if (/(محمود|شخصية)/.test(normalized) && isWallet) return { category: "محفظة شخصية", categoryIssue: "" };
+  if (isWallet) return { category: "بال بي", categoryIssue: "" };
+  if (/محفظة|wallet|بال\s*بي|pal\s*pay|palpay/i.test(source)) return { category: "بال بي", categoryIssue: "" };
+  if (/بنك|bank/i.test(source)) return { category: source, categoryIssue: "" };
+  if (source) return { category: source, categoryIssue: "" };
   return { category: "محفظة", categoryIssue: "لم يظهر رقم فيزا أو اسم محفظة واضح؛ تم تصنيفها كمحفظة" };
 }
 
@@ -368,39 +465,154 @@ function stageAVisaNumber(value: string): string {
   return value.match(/(?:^|\D)(\d{4})(?:\D|$)/)?.[1] || "";
 }
 
-function StageAPlatform({ onBack, onTransferToB, onTransferVisaToC, onSafeActivities }: { onBack: () => void; onTransferToB: (results: StageAResult[]) => void; onTransferVisaToC: (results: StageAResult[]) => void; onSafeActivities?: (activities: string[]) => void }) {
+async function parseInvoiceFiles(files: File[], baseHeaders: string[] = []) {
+  if (!files.length) throw new Error("اختر ملفاً واحداً على الأقل.");
+  const buffers = await Promise.all(files.map(readFileBuf));
+  const worker = new Worker(new URL("../workers/statement-parser.worker.ts", import.meta.url), { type: "module" });
+  try {
+    const parsed = await new Promise<{ headers: string[]; rows: Record<string, unknown>[]; fileName: string }>((resolve, reject) => {
+      worker.onmessage = (event: MessageEvent<
+        | { ok: true; headers: string[]; rows: Record<string, unknown>[]; fileName: string }
+        | { ok: false; message: string }
+      >) => {
+        if (event.data.ok) resolve(event.data);
+        else reject(new Error(event.data.message));
+      };
+      worker.onerror = event => reject(new Error(event.message || "تعذّر تشغيل معالج الملفات."));
+      worker.onmessageerror = () => reject(new Error("تعذّر استلام نتيجة معالجة الملف."));
+      worker.postMessage({
+        role: "invoice",
+        files: files.map((file, index) => ({ fileName: file.name, buffer: buffers[index] })),
+        baseHeaders,
+      }, buffers);
+    });
+    return parsed;
+  } finally {
+    worker.terminate();
+  }
+}
+
+function detectInvoiceFileColumns(headers: string[]) {
+  return {
+    name: headers.find(header => ["البيان", "بيان"].includes(normName(header))) ||
+      autoDetect(headers, ["إسم الزبون", "اسم الزبون", "اسم العميل", "customer name", "customer", "client", "name"]),
+    paidAmount: detectCardPaidColumn(headers) || autoDetect(headers, ["paid", "مدفوع", "المبلغ المدفوع"]) || autoDetect(headers, HINTS.credit),
+    receivedAmount: autoDetect(headers, ["received", "مستلم", "المبلغ المستلم"]) || autoDetect(headers, HINTS.debit),
+  };
+}
+
+function StageAPlatform({ onBack, onTransferToB, onTransferVisaToC, onSafeActivities }: { onBack: () => void; onTransferToB: (results: StageAResult[], summary: StageASummary) => void; onTransferVisaToC: (results: StageAResult[]) => void; onSafeActivities?: (activities: string[]) => void }) {
   const [databaseFile, setDatabaseFile] = useState<File | null>(null);
+  const [databaseFileName, setDatabaseFileName] = useState("");
   const [databaseHeaders, setDatabaseHeaders] = useState<string[]>([]);
   const [databaseRows, setDatabaseRows] = useState<Record<string, unknown>[]>([]);
-  const [databaseMap, setDatabaseMap] = useState({ name: "", amount: "", userId: "", registrationTime: "", customerNumber: "", invoiceNumber: "" });
-  const [invoiceFiles, setInvoiceFiles] = useState<Record<string, File | null>>({ bank: null, wallet: null, visa: null });
-  const [invoiceHeaders, setInvoiceHeaders] = useState<Record<string, string[]>>({ bank: [], wallet: [], visa: [] });
-  const [invoiceRows, setInvoiceRows] = useState<Record<string, Record<string, unknown>[]>>({ bank: [], wallet: [], visa: [] });
-  const [invoiceMaps, setInvoiceMaps] = useState<Record<string, { name: string; paidAmount: string; receivedAmount: string; accountType: string; date: string; reference: string }>>({
-    bank: { name: "", paidAmount: "", receivedAmount: "", accountType: "", date: "", reference: "" }, wallet: { name: "", paidAmount: "", receivedAmount: "", accountType: "", date: "", reference: "" }, visa: { name: "", paidAmount: "", receivedAmount: "", accountType: "", date: "", reference: "" }
+  const [databaseMap, setDatabaseMap] = useState({ name: "", amount: "", invoiceTotal: "", cashAmount: "", checkAmount: "", debtAmount: "", userId: "", date: "", registrationTime: "", customerNumber: "", invoiceNumber: "" });
+  const [removeRepeatedHeaders, setRemoveRepeatedHeaders] = useState(true);
+  const invoiceMapDefaults = { name: "", paidAmount: "", receivedAmount: "", accountType: "", date: "", registrationTime: "", reference: "", userId: "" };
+  const [invoiceFiles, setInvoiceFiles] = useState<Record<string, File | null>>({ bank: null, wallet: null, visa: null, jawwal: null });
+  const [invoiceFileNames, setInvoiceFileNames] = useState<Record<string, string>>({ bank: "", wallet: "", visa: "", jawwal: "" });
+  const [invoiceFileCounts, setInvoiceFileCounts] = useState<Record<string, number>>({ bank: 0, wallet: 0, visa: 0, jawwal: 0 });
+  const [invoiceFileSnapshots, setInvoiceFileSnapshots] = useState<Record<string, StageAInvoiceFileSnapshot[]>>({});
+  const [showInvoiceSnapshots, setShowInvoiceSnapshots] = useState<Record<string, boolean>>({});
+  const [invoiceProcessing, setInvoiceProcessing] = useState<Record<string, boolean>>({});
+  const [invoiceHeaders, setInvoiceHeaders] = useState<Record<string, string[]>>({ bank: [], wallet: [], visa: [], jawwal: [] });
+  const [invoiceRows, setInvoiceRows] = useState<Record<string, Record<string, unknown>[]>>({ bank: [], wallet: [], visa: [], jawwal: [] });
+  const [invoiceMaps, setInvoiceMaps] = useState<Record<string, typeof invoiceMapDefaults>>({
+    bank: { ...invoiceMapDefaults }, wallet: { ...invoiceMapDefaults }, visa: { ...invoiceMapDefaults }, jawwal: { ...invoiceMapDefaults }
   });
-  const [invoiceSwaps, setInvoiceSwaps] = useState<Record<string, boolean>>({ bank: false, wallet: false, visa: false });
+  const [invoiceSwaps, setInvoiceSwaps] = useState<Record<string, boolean>>({ bank: true, wallet: true, visa: true, jawwal: true });
+  const [invoiceRemoveRepeatedHeaders, setInvoiceRemoveRepeatedHeaders] = useState<Record<string, boolean>>({ bank: true, wallet: true, visa: true, jawwal: true });
+  const [customInvoicePlatforms, setCustomInvoicePlatforms] = useState<Array<{ id: string; name: string }>>([]);
+  const [newInvoicePlatformName, setNewInvoicePlatformName] = useState("");
   const [results, setResults] = useState<StageAResult[]>([]);
+  const [databaseSummary, setDatabaseSummary] = useState<StageASummary>({ databaseInvoiceCount: 0, databaseInvoiceTotal: 0, databaseCashTotal: 0, databaseDebtTotal: 0, databaseCardTotal: 0 });
   const [resultFilter, setResultFilter] = useState<"all" | "matched" | "unmatched" | "wallet" | "جوال بي" | "visa">("all");
   const [selectedResultIds, setSelectedResultIds] = useState<Set<string>>(new Set());
   const [resultNameSearch, setResultNameSearch] = useState("");
   const [resultAmountSearch, setResultAmountSearch] = useState("");
+  const [resultMinAmount, setResultMinAmount] = useState("");
+  const [resultMaxAmount, setResultMaxAmount] = useState("");
   const [stageASourceFilter, setStageASourceFilter] = useState("all");
   const [matchedSearch, setMatchedSearch] = useState("");
   const [selectedMatchedIds, setSelectedMatchedIds] = useState<Set<string>>(new Set());
   const [replacementSearch, setReplacementSearch] = useState("");
   const [stageAPage, setStageAPage] = useState(1);
   const [error, setError] = useState<string | null>(null);
+  const [showDeleteMenu, setShowDeleteMenu] = useState(false);
+  const [showDatabaseInvoices, setShowDatabaseInvoices] = useState(false);
+  const [databaseInvoicePage, setDatabaseInvoicePage] = useState(1);
+  const stageADataLoaded = useRef(false);
+
+  useEffect(() => {
+    storageGet<any>("stage_a_session", null).then(session => {
+      if (session) {
+        setResults(session.results ?? []);
+        setDatabaseSummary(session.summary ?? { databaseInvoiceCount: 0, databaseInvoiceTotal: 0, databaseCashTotal: 0, databaseDebtTotal: 0, databaseCardTotal: 0 });
+        setDatabaseFileName(session.databaseFileName ?? "");
+        setDatabaseHeaders(session.databaseHeaders ?? []);
+        setDatabaseRows(session.databaseRows ?? []);
+        setDatabaseMap(prev => ({ ...prev, ...(session.databaseMap ?? {}) }));
+        setRemoveRepeatedHeaders(session.removeRepeatedHeaders ?? true);
+        setInvoiceFileNames(session.invoiceFileNames ?? {});
+        setInvoiceFileCounts(session.invoiceFileCounts ?? {});
+        setInvoiceFileSnapshots(session.invoiceFileSnapshots ?? {});
+        setInvoiceHeaders(prev => ({ ...prev, ...(session.invoiceHeaders ?? {}) }));
+        setInvoiceRows(prev => ({ ...prev, ...(session.invoiceRows ?? {}) }));
+        const restoredInvoiceMaps = { ...Object.fromEntries(Object.keys(session.invoiceHeaders ?? {}).map(source => [source, { ...invoiceMapDefaults, ...(session.invoiceMaps?.[source] ?? {}) }])), ...(session.invoiceMaps ?? {}) } as Record<string, typeof invoiceMapDefaults>;
+        (Object.entries(session.invoiceHeaders ?? {}) as Array<[string, string[]]>).forEach(([source, headers]) => {
+          if (session.invoiceSwaps?.[source] === true || !headers.length) return;
+          const detected = detectInvoiceFileColumns(headers);
+          restoredInvoiceMaps[source] = {
+            ...restoredInvoiceMaps[source],
+            name: restoredInvoiceMaps[source]?.name || detected.name,
+            paidAmount: detected.paidAmount,
+            receivedAmount: detected.receivedAmount,
+          };
+        });
+        setInvoiceMaps(prev => ({ ...prev, ...restoredInvoiceMaps }));
+        const savedInvoiceSwaps = session.invoiceSwaps ?? {};
+        setInvoiceSwaps(prev => ({
+          ...prev,
+          ...savedInvoiceSwaps,
+          bank: savedInvoiceSwaps.bank ?? true,
+          wallet: savedInvoiceSwaps.wallet ?? true,
+          visa: savedInvoiceSwaps.visa ?? true,
+          jawwal: savedInvoiceSwaps.jawwal ?? true,
+        }));
+        setInvoiceRemoveRepeatedHeaders(prev => ({ ...prev, ...(session.invoiceRemoveRepeatedHeaders ?? {}) }));
+        setCustomInvoicePlatforms(session.customInvoicePlatforms ?? []);
+        setNewInvoicePlatformName("");
+      }
+      stageADataLoaded.current = true;
+    });
+  }, []);
+  useEffect(() => {
+    if (!stageADataLoaded.current) return;
+    const timer = window.setTimeout(() => {
+      void storageSet("stage_a_session", {
+        results, summary: databaseSummary, databaseFileName, databaseHeaders, databaseRows, databaseMap, removeRepeatedHeaders,
+        invoiceFileNames, invoiceFileCounts, invoiceFileSnapshots, invoiceHeaders, invoiceRows, invoiceMaps, invoiceSwaps, invoiceRemoveRepeatedHeaders, customInvoicePlatforms,
+      });
+    }, 500);
+    return () => window.clearTimeout(timer);
+  }, [results, databaseSummary, databaseFileName, databaseHeaders, databaseRows, databaseMap, removeRepeatedHeaders,
+    invoiceFileNames, invoiceFileCounts, invoiceFileSnapshots, invoiceHeaders, invoiceRows, invoiceMaps, invoiceSwaps, invoiceRemoveRepeatedHeaders, customInvoicePlatforms]);
 
   const loadDatabase = async (file: File) => {
-    setDatabaseFile(file); setError(null);
+    setDatabaseFile(file); setDatabaseFileName(file.name); setError(null);
     try {
+      await saveStageASourceFiles("database", [file]);
       const parsed = parseSheet(await readFileBuf(file));
       setDatabaseHeaders(parsed.headers); setDatabaseRows(parsed.rows);
       setDatabaseMap({
         name: autoDetect(parsed.headers, ["اسم الزبون", "اسم العميل", "customer", "client", "name", "اسم"]),
         amount: autoDetect(parsed.headers, ["مدفوع بالكارد", "مدفوع بالكرت", "card paid", "card payment"]) || autoDetect(parsed.headers, HINTS.debit) || autoDetect(parsed.headers, ["amount", "مبلغ"]),
-        userId: autoDetect(parsed.headers, ["user", "userid", "user id", "مستخدم", "رقم المستخدم", "كاشير"]),
+        invoiceTotal: autoDetect(parsed.headers, ["مبلغ الفاتورة", "اجمالي الفاتورة", "إجمالي الفاتورة", "invoice total", "total"]),
+        cashAmount: autoDetect(parsed.headers, ["مدفوع نقدا", "مدفوع نقداً", "نقدا", "cash paid", "cash"]),
+        checkAmount: autoDetect(parsed.headers, ["مدفوع بشيك", "قيمة الشيك", "الشيك", "check paid", "check"]),
+        debtAmount: autoDetect(parsed.headers, ["مبلغ الحساب", "المتبقي", "الدين", "الرصيد المستحق", "balance due", "due"]),
+        userId: autoDetect(parsed.headers, ["user id", "userid", "user number", "رقم المستخدم", "معرف المستخدم", "رقم الكاشير", "المستخدم"]),
+        date: autoDetect(parsed.headers, ["التاريخ", "تاريخ الفاتورة", "invoice date", "date"]),
         registrationTime: autoDetect(parsed.headers, ["الساعة", "وقت التسجيل", "وقت الفاتورة", "time", "timestamp"]),
         customerNumber: autoDetect(parsed.headers, ["رقم الزبون", "رقم العميل", "customer number", "customer id", "client id"]),
         invoiceNumber: autoDetect(parsed.headers, ["رقم الفاتورة", "رقم الفاتوره", "invoice number", "invoice no", "invoice id"])
@@ -408,21 +620,124 @@ function StageAPlatform({ onBack, onTransferToB, onTransferVisaToC, onSafeActivi
     } catch (e) { setError((e as Error).message); }
   };
 
-  const loadInvoices = async (source: string, file: File) => {
-    setInvoiceFiles(prev => ({ ...prev, [source]: file })); setError(null);
+  const loadInvoices = async (source: string, files: File[], append = false) => {
+    if (!files.length) return;
+    setInvoiceFiles(previous => ({ ...previous, [source]: files[0] }));
+    setInvoiceProcessing(previous => ({ ...previous, [source]: true }));
+    setError(`جارٍ تحليل ${files.length} ملف${files.length > 1 ? "ات" : ""} واستخراج الحركات وتنظيف الأرصدة والترويسات...`);
     try {
-      const parsed = parseSheet(await readFileBuf(file));
-      setInvoiceHeaders(prev => ({ ...prev, [source]: parsed.headers }));
-      setInvoiceRows(prev => ({ ...prev, [source]: parsed.rows }));
-      setInvoiceMaps(prev => ({ ...prev, [source]: {
-        name: autoDetect(parsed.headers, HINTS.name),
-        paidAmount: detectCardPaidColumn(parsed.headers) || autoDetect(parsed.headers, HINTS.debit) || autoDetect(parsed.headers, ["amount", "مبلغ"]),
-        receivedAmount: autoDetect(parsed.headers, HINTS.credit),
-        accountType: autoDetect(parsed.headers, HINTS.accountType),
-        date: autoDetect(parsed.headers, HINTS.date),
-        reference: autoDetect(parsed.headers, HINTS.authNum)
-      }}));
-    } catch (e) { setError((e as Error).message); }
+      await saveStageASourceFiles(source, files, append);
+      const previousHeaders = append ? invoiceHeaders[source] ?? [] : [];
+      const previousRows = append ? invoiceRows[source] ?? [] : [];
+      const parsed = await parseInvoiceFiles(files, previousHeaders);
+      if (!append && previousRows.length && invoiceFileNames[source]) {
+        const snapshot: StageAInvoiceFileSnapshot = {
+          fileName: invoiceFileNames[source],
+          fileCount: invoiceFileCounts[source] ?? 1,
+          headers: previousHeaders,
+          rows: previousRows,
+          map: invoiceMaps[source] ?? { ...invoiceMapDefaults },
+          swap: invoiceSwaps[source] ?? true,
+        };
+        setInvoiceFileSnapshots(previous => ({ ...previous, [source]: [snapshot] }));
+      }
+      const fileName = append && invoiceFileNames[source] ? `${invoiceFileNames[source]} + ${parsed.fileName}` : parsed.fileName;
+      setInvoiceFileNames(previous => ({ ...previous, [source]: fileName }));
+      setInvoiceFileCounts(previous => ({ ...previous, [source]: (append ? previous[source] ?? 0 : 0) + files.length }));
+      setInvoiceHeaders(previous => ({ ...previous, [source]: parsed.headers }));
+      setInvoiceRows(previous => ({ ...previous, [source]: [...previousRows, ...parsed.rows] }));
+      const invoiceColumns = detectInvoiceFileColumns(parsed.headers);
+      setInvoiceMaps(previous => ({ ...previous, [source]: {
+        ...previous[source],
+        ...invoiceColumns,
+        paidAmount: invoiceColumns.paidAmount || autoDetect(parsed.headers, ["amount", "مبلغ"]),
+        accountType: autoDetect(parsed.headers, HINTS.accountType) || previous[source]?.accountType || "",
+        userId: autoDetect(parsed.headers, ["user id", "userid", "user number", "رقم المستخدم", "معرف المستخدم", "رقم الكاشير", "المستخدم"]) || previous[source]?.userId || "",
+        date: autoDetect(parsed.headers, HINTS.date) || previous[source]?.date || "",
+        registrationTime: autoDetect(parsed.headers, ["الساعة", "وقت التسجيل", "وقت الفاتورة", "time", "timestamp"]) || previous[source]?.registrationTime || "",
+        reference: autoDetect(parsed.headers, HINTS.authNum) || previous[source]?.reference || "",
+      } }));
+      setInvoiceSwaps(previous => ({ ...previous, [source]: true }));
+      setError(`تمت معالجة ${files.length} ملف${files.length > 1 ? "ات" : ""}: اكتشاف صف العناوين وتنظيف الترويسات والأرصدة وتجهيز ${previousRows.length + parsed.rows.length} صفاً.`);
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setInvoiceProcessing(previous => ({ ...previous, [source]: false }));
+    }
+  };
+
+  const processDatabaseHeaders = () => {
+    if (!removeRepeatedHeaders) return;
+    const headerKeys = databaseHeaders.map(header => normName(header));
+    const cleanedRows = databaseRows.filter(row => !databaseHeaders.every((header, index) =>
+      normName(String(row[header] ?? "")) === headerKeys[index]
+    ));
+    setDatabaseRows(cleanedRows);
+    setError(cleanedRows.length === databaseRows.length ? "لم يتم العثور على ترويسات مكررة لإزالتها." : `تمت إزالة ${databaseRows.length - cleanedRows.length} صفوف ترويسة مكررة.`);
+  };
+
+  const processInvoiceHeaders = (source: string) => {
+    const headers = invoiceHeaders[source] ?? [];
+    const sourceRows = invoiceRows[source] ?? [];
+    const headerKeys = headers.map(header => normName(header));
+    const withoutRepeatedHeaders = invoiceRemoveRepeatedHeaders[source] === false
+      ? sourceRows
+      : sourceRows.filter(row => !headers.every((header, index) => normName(String(row[header] ?? "")) === headerKeys[index]));
+    const cleaned = removeStatementBalances(headers, withoutRepeatedHeaders.map(row => Object.fromEntries(
+      Object.entries(row).map(([header, value]) => [header, cleanStatementText(value as StatementCell)])
+    )));
+    setInvoiceHeaders(previous => ({ ...previous, [source]: cleaned.headers }));
+    setInvoiceRows(previous => ({ ...previous, [source]: cleaned.rows }));
+    setError(`اكتملت معالجة ${invoiceFileNames[source] || source}: إزالة ${sourceRows.length - withoutRepeatedHeaders.length} ترويسة مكررة و${withoutRepeatedHeaders.length - cleaned.rows.length} صف رصيد/غير حركي، واستبقاء ${cleaned.rows.length} حركة.`);
+  };
+  const exportInvoiceSheet = (source: string) => {
+    const headers = invoiceHeaders[source] ?? [];
+    const rows = invoiceRows[source] ?? [];
+    if (!headers.length || !rows.length) {
+      setError("لا توجد حركات معالجة لتصديرها.");
+      return;
+    }
+    const worksheet = XLSX.utils.aoa_to_sheet([headers, ...rows.map(row => headers.map(header => row[header] ?? ""))]);
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, "كشف منظف");
+    XLSX.writeFile(workbook, `${(invoiceFileNames[source] || source).replace(/\.[^.]+/g, "").replace(/[\\/]+/g, "-")}-منظف.xlsx`);
+  };
+  const restoreInvoiceSnapshot = (source: string, snapshot: StageAInvoiceFileSnapshot) => {
+    setInvoiceFiles(previous => ({ ...previous, [source]: null }));
+    setInvoiceFileNames(previous => ({ ...previous, [source]: snapshot.fileName }));
+    setInvoiceFileCounts(previous => ({ ...previous, [source]: snapshot.fileCount }));
+    setInvoiceHeaders(previous => ({ ...previous, [source]: snapshot.headers }));
+    setInvoiceRows(previous => ({ ...previous, [source]: snapshot.rows }));
+    setInvoiceMaps(previous => ({ ...previous, [source]: snapshot.map }));
+    setInvoiceSwaps(previous => ({ ...previous, [source]: snapshot.swap }));
+    setShowInvoiceSnapshots(previous => ({ ...previous, [source]: false }));
+    setError(`تم استرجاع ${snapshot.fileName} (${snapshot.rows.length} حركة).`);
+  };
+
+  const clearStageASession = () => {
+    if (!window.confirm("مسح جميع ملفات ونتائج المرحلة A؟ المشاريع المحفوظة لن تتأثر.")) return;
+    setDatabaseFile(null);
+    setDatabaseFileName("");
+    setDatabaseHeaders([]);
+    setDatabaseRows([]);
+    setDatabaseMap({ name: "", amount: "", invoiceTotal: "", cashAmount: "", checkAmount: "", debtAmount: "", userId: "", date: "", registrationTime: "", customerNumber: "", invoiceNumber: "" });
+    setInvoiceFiles({ bank: null, wallet: null, visa: null, jawwal: null });
+    setInvoiceFileNames({ bank: "", wallet: "", visa: "", jawwal: "" });
+    setInvoiceFileCounts({ bank: 0, wallet: 0, visa: 0, jawwal: 0 });
+    setInvoiceFileSnapshots({});
+    setShowInvoiceSnapshots({});
+    setInvoiceHeaders({ bank: [], wallet: [], visa: [], jawwal: [] });
+    setInvoiceRows({ bank: [], wallet: [], visa: [], jawwal: [] });
+    setInvoiceMaps({ bank: { ...invoiceMapDefaults }, wallet: { ...invoiceMapDefaults }, visa: { ...invoiceMapDefaults }, jawwal: { ...invoiceMapDefaults } });
+    setInvoiceSwaps({ bank: true, wallet: true, visa: true, jawwal: true });
+    setInvoiceRemoveRepeatedHeaders({ bank: true, wallet: true, visa: true, jawwal: true });
+    setCustomInvoicePlatforms([]);
+    setResults([]);
+    setDatabaseSummary({ databaseInvoiceCount: 0, databaseInvoiceTotal: 0, databaseCashTotal: 0, databaseDebtTotal: 0, databaseCardTotal: 0, databaseDiscountTotal: 0, databaseInvoices: [] });
+    setSelectedResultIds(new Set());
+    setError(null);
+    void storageSet("stage_a_session", null);
+    void clearStageASourceFiles().catch(cause => console.error("تعذر حذف ملفات الجلسة المؤقتة للمرحلة A:", cause));
   };
 
   const runStageA = () => {
@@ -430,14 +745,39 @@ function StageAPlatform({ onBack, onTransferToB, onTransferVisaToC, onSafeActivi
     const available = databaseRows.map((row, index) => ({ row, index, used: false }));
     const parseStageAAmount = (value: unknown) => Number.parseFloat(String(value ?? "").replace(/[٫٬]/g, match => match === "٫" ? "." : "").replace(/,/g, "")) || 0;
     const output: StageAResult[] = [];
-    (["bank", "wallet", "visa"] as const).forEach(source => {
+    const databaseInvoices: StageADatabaseInvoice[] = databaseRows.map(row => {
+      const invoiceTotal = parseStageAAmount(row[databaseMap.invoiceTotal]);
+      const cashAmount = parseStageAAmount(row[databaseMap.cashAmount]);
+      const checkAmount = parseStageAAmount(row[databaseMap.checkAmount]);
+      const cardAmount = parseStageAAmount(row[databaseMap.amount]);
+      const debtAmount = parseStageAAmount(row[databaseMap.debtAmount]);
+      const discountAmount = Math.max(0, Math.round((invoiceTotal - cashAmount - checkAmount - cardAmount - debtAmount) * 100) / 100);
+      return {
+        invoiceNumber: String(row[databaseMap.invoiceNumber] ?? ""),
+        invoiceDate: stageAEnglishDate(row[databaseMap.date]),
+        registrationTime: String(row[databaseMap.registrationTime] ?? ""),
+        name: String(row[databaseMap.name] ?? ""),
+        customerNumber: String(row[databaseMap.customerNumber] ?? ""),
+        userId: String(row[databaseMap.userId] ?? ""),
+        invoiceTotal, cashAmount, checkAmount, cardAmount, debtAmount, discountAmount,
+      };
+    });
+    const sources = [
+      { key: "bank", label: "بنك فلسطين" },
+      { key: "wallet", label: "بال بي" },
+      { key: "visa", label: "فيزا" },
+      { key: "jawwal", label: "جوال بي" },
+      ...customInvoicePlatforms.map(platform => ({ key: platform.id, label: platform.name })),
+    ];
+    sources.forEach(({ key: source, label: sourceLabel }) => {
       const map = invoiceMaps[source];
-      invoiceRows[source].forEach((invoice, index) => {
+      (invoiceRows[source] || []).forEach((invoice, index) => {
         const originalName = String(map.name ? invoice[map.name] : "").trim();
         const name = cleanStageAName(originalName);
         const paidAmount = parseStageAAmount(map.paidAmount ? invoice[map.paidAmount] : 0);
         const receivedAmount = parseStageAAmount(map.receivedAmount ? invoice[map.receivedAmount] : 0);
         const amount = invoiceSwaps[source] ? receivedAmount || paidAmount : paidAmount || receivedAmount;
+        const isReceived = invoiceSwaps[source] ? receivedAmount > 0 || paidAmount === 0 : paidAmount > 0 || receivedAmount === 0;
         if (!name && !amount) return;
         const sameName = available.filter(item => !item.used && stageANameKey(String(item.row[databaseMap.name])) === stageANameKey(name));
         const match = sameName.find(item => Math.abs(parseStageAAmount(item.row[databaseMap.amount]) - amount) <= 0.01);
@@ -446,31 +786,76 @@ function StageAPlatform({ onBack, onTransferToB, onTransferVisaToC, onSafeActivi
         // المبالغ الأخرى لنفس الاسم تظهر في رسالة المشكلة فقط.
         const databaseCandidate = match;
         const issue = match ? "" : sameName.length ? `الاسم موجود، لكن المبلغ مختلف (المطلوب: ${fmtNum(amount)}؛ المتاح: ${sameName.map(item => fmtNum(parseStageAAmount(item.row[databaseMap.amount]))).join("، ")})` : "الاسم غير موجود في قاعدة البيانات";
-        const sourceLabel = source === "bank" ? "بنك فلسطين" : source === "wallet" ? "محفظة تجارية" : "فيزا";
         const classification = classifyStageAInvoice(originalName, sourceLabel);
         output.push({
           id: index, source: sourceLabel, name, originalName, amount,
           databaseName: databaseCandidate ? String(databaseCandidate.row[databaseMap.name] ?? "") : "",
           databaseAmount: databaseCandidate ? parseStageAAmount(databaseCandidate.row[databaseMap.amount]) : 0,
-          userId: databaseCandidate ? String(databaseCandidate.row[databaseMap.userId] ?? "") : "",
-          registrationTime: databaseCandidate ? String(databaseCandidate.row[databaseMap.registrationTime] ?? "") : "",
+          invoiceTotal: databaseCandidate ? parseStageAAmount(databaseCandidate.row[databaseMap.invoiceTotal]) : 0,
+          cashAmount: databaseCandidate ? parseStageAAmount(databaseCandidate.row[databaseMap.cashAmount]) : 0,
+          checkAmount: databaseCandidate ? parseStageAAmount(databaseCandidate.row[databaseMap.checkAmount]) : 0,
+          debtAmount: databaseCandidate ? parseStageAAmount(databaseCandidate.row[databaseMap.debtAmount]) : 0,
+          discountAmount: databaseCandidate ? Math.max(0, Math.round((
+            parseStageAAmount(databaseCandidate.row[databaseMap.invoiceTotal]) -
+            parseStageAAmount(databaseCandidate.row[databaseMap.cashAmount]) -
+            parseStageAAmount(databaseCandidate.row[databaseMap.checkAmount]) -
+            parseStageAAmount(databaseCandidate.row[databaseMap.amount]) -
+            parseStageAAmount(databaseCandidate.row[databaseMap.debtAmount])
+          ) * 100) / 100) : 0,
+          type: isReceived ? "مستلم" : "مدفوع",
+          userId: databaseCandidate ? String(databaseCandidate.row[databaseMap.userId] ?? "") : String(map.userId ? invoice[map.userId] ?? "" : ""),
+          invoiceDate: databaseCandidate ? stageAEnglishDate(databaseCandidate.row[databaseMap.date]) : stageAEnglishDate(map.date ? invoice[map.date] : ""),
+          registrationTime: databaseCandidate ? String(databaseCandidate.row[databaseMap.registrationTime] ?? "") : String(map.registrationTime ? invoice[map.registrationTime] ?? "" : ""),
           customerNumber: databaseCandidate ? String(databaseCandidate.row[databaseMap.customerNumber] ?? "") : "",
-          invoiceNumber: databaseCandidate ? String(databaseCandidate.row[databaseMap.invoiceNumber] ?? "") : "",
+          invoiceNumber: databaseCandidate ? String(databaseCandidate.row[databaseMap.invoiceNumber] ?? "") : String(map.reference ? invoice[map.reference] ?? "" : ""),
           accountType: String(map.accountType ? invoice[map.accountType] : "").trim(), invoice, matched: !!match, issue, ...classification
         });
       });
     });
+    const summary: StageASummary = databaseInvoices.reduce<StageASummary>((current, invoice) => ({
+      databaseInvoiceCount: current.databaseInvoiceCount + 1,
+      databaseInvoiceTotal: current.databaseInvoiceTotal + invoice.invoiceTotal,
+      databaseCashTotal: current.databaseCashTotal + invoice.cashAmount,
+      databaseDebtTotal: current.databaseDebtTotal + invoice.debtAmount,
+      databaseCardTotal: current.databaseCardTotal + invoice.cardAmount,
+      databaseDiscountTotal: (current.databaseDiscountTotal ?? 0) + invoice.discountAmount,
+    }), { databaseInvoiceCount: 0, databaseInvoiceTotal: 0, databaseCashTotal: 0, databaseDebtTotal: 0, databaseCardTotal: 0, databaseDiscountTotal: 0 });
+    summary.databaseInvoices = databaseInvoices;
+    setDatabaseSummary(summary);
     setResults(output);
+    void storageSet("stage_a_session", {
+      results: output, summary, databaseFileName, databaseHeaders, databaseRows, databaseMap, removeRepeatedHeaders,
+      invoiceFileNames, invoiceHeaders, invoiceRows, invoiceMaps, invoiceSwaps, invoiceRemoveRepeatedHeaders, customInvoicePlatforms,
+    });
     setError(null);
   };
 
   const exportStageA = () => {
     if (!results.length) return;
     const workbook = XLSX.utils.book_new();
-    const rows = results.map(result => [result.source, result.category, result.originalName, result.databaseName, result.amount, result.databaseAmount || "", result.userId, result.registrationTime, result.customerNumber, result.invoiceNumber, result.accountType, result.matched ? "مطابق" : "غير مطابق", result.categoryIssue || result.issue]);
-    const worksheet = XLSX.utils.aoa_to_sheet([["المصدر الأصلي", "التصنيف", "البيان الأصلي", "البيان من قاعدة البيانات", "المبلغ", "مبلغ قاعدة البيانات", "رقم المستخدم", "الساعة", "رقم الزبون", "رقم الفاتورة", "نوع الحساب من ملف الفواتير", "حالة المطابقة", "المشكلة / التصحيح المطلوب"], ...rows]);
-    worksheet["!cols"] = [{ wch: 18 }, { wch: 14 }, { wch: 32 }, { wch: 28 }, { wch: 14 }, { wch: 20 }, { wch: 22 }, { wch: 16 }, { wch: 48 }];
+    const rows = results.map(result => [result.source, result.category, result.originalName, result.databaseName, result.amount, result.type, result.databaseAmount || "", result.invoiceTotal || "", result.cashAmount || "", result.checkAmount || "", result.debtAmount || "", result.discountAmount || "", result.userId, result.invoiceDate, result.registrationTime, result.customerNumber, result.invoiceNumber, result.accountType, result.matched ? "مطابق" : "غير مطابق", result.categoryIssue || result.issue]);
+    const worksheet = XLSX.utils.aoa_to_sheet([["المنصة", "التصنيف", "بيان الفاتورة", "اسم الزبون في قاعدة البيانات", "مبلغ الحركة", "النوع", "مدفوع بالتطبيق/الكارد", "إجمالي الفاتورة", "مدفوع نقداً", "مدفوع بشيك", "المتبقي على الزبون", "الخصم", "رقم المستخدم", "تاريخ الفاتورة", "الساعة", "رقم الزبون", "رقم الفاتورة", "نوع الحساب", "حالة المطابقة", "المشكلة / التصحيح المطلوب"], ...rows]);
+    worksheet["!cols"] = [{ wch: 18 }, { wch: 14 }, { wch: 32 }, { wch: 28 }, { wch: 14 }, { wch: 12 }, { wch: 18 }, { wch: 16 }, { wch: 16 }, { wch: 16 }, { wch: 18 }, { wch: 12 }, { wch: 14 }, { wch: 14 }, { wch: 14 }, { wch: 16 }, { wch: 16 }, { wch: 18 }, { wch: 14 }, { wch: 48 }];
     XLSX.utils.book_append_sheet(workbook, worksheet, "نتائج المرحلة A");
+    XLSX.utils.book_append_sheet(workbook, XLSX.utils.aoa_to_sheet([
+      ["ملخص اليوم من قاعدة البيانات", "القيمة"],
+      ["عدد الفواتير", databaseSummary.databaseInvoiceCount],
+      ["إجمالي الفواتير", databaseSummary.databaseInvoiceTotal],
+      ["المبلغ النقدي", databaseSummary.databaseCashTotal],
+      ["المدفوع بالشيك", (databaseSummary.databaseInvoices ?? []).reduce((sum, invoice) => sum + invoice.checkAmount, 0)],
+      ["مجموع الخصومات", databaseSummary.databaseDiscountTotal ?? 0],
+      ["المتبقي على الزبائن", databaseSummary.databaseDebtTotal],
+      ["المدفوع بالتطبيقات/البطاقات", databaseSummary.databaseCardTotal],
+    ]), "ملخص اليوم");
+    const databaseInvoiceRows = databaseSummary.databaseInvoices ?? [];
+    XLSX.utils.book_append_sheet(workbook, XLSX.utils.aoa_to_sheet([
+      ["رقم الفاتورة", "التاريخ", "الوقت", "اسم الزبون", "رقم الزبون", "رقم المستخدم", "إجمالي الفاتورة", "نقدي", "شيك", "تطبيق/بطاقة", "دين", "الخصم"],
+      ...databaseInvoiceRows.map(invoice => [invoice.invoiceNumber, invoice.invoiceDate, invoice.registrationTime, invoice.name, invoice.customerNumber, invoice.userId, invoice.invoiceTotal, invoice.cashAmount, invoice.checkAmount, invoice.cardAmount, invoice.debtAmount, invoice.discountAmount]),
+    ]), "كل فواتير قاعدة البيانات");
+    XLSX.utils.book_append_sheet(workbook, XLSX.utils.aoa_to_sheet([
+      ["رقم الفاتورة", "التاريخ", "الوقت", "اسم الزبون", "رقم الزبون", "رقم المستخدم", "إجمالي الفاتورة", "نقدي", "شيك", "تطبيق/بطاقة", "دين", "الخصم"],
+      ...databaseInvoiceRows.filter(invoice => invoice.discountAmount > 0).map(invoice => [invoice.invoiceNumber, invoice.invoiceDate, invoice.registrationTime, invoice.name, invoice.customerNumber, invoice.userId, invoice.invoiceTotal, invoice.cashAmount, invoice.checkAmount, invoice.cardAmount, invoice.debtAmount, invoice.discountAmount]),
+    ]), "فواتير فيها خصم");
     XLSX.writeFile(workbook, "نتائج_المرحلة_A_ومشاكل_اخرى.xlsx");
   };
 
@@ -494,10 +879,13 @@ function StageAPlatform({ onBack, onTransferToB, onTransferVisaToC, onSafeActivi
     const amountQuery = resultAmountSearch.trim();
     return (!nameQuery || `${result.originalName} ${result.databaseName} ${JSON.stringify(result.invoice)}`.toLowerCase().includes(nameQuery)) &&
       (stageASourceFilter === "all" || result.source === stageASourceFilter || result.category === stageASourceFilter) &&
+      (resultFilter === "all" || (resultFilter === "matched" ? result.matched : resultFilter === "unmatched" ? !result.matched : resultFilter === "wallet" ? /محفظة|بال بي/.test(result.category) : result.category === resultFilter)) &&
+      (!resultMinAmount || result.amount >= Number(resultMinAmount)) &&
+      (!resultMaxAmount || result.amount <= Number(resultMaxAmount)) &&
       (!amountQuery || String(result.amount).includes(amountQuery) || String(result.databaseAmount).includes(amountQuery));
   });
   const pagedActionResults = allActionResults.slice((Math.min(stageAPage, Math.max(1, Math.ceil(allActionResults.length / 50))) - 1) * 50, Math.min(stageAPage, Math.max(1, Math.ceil(allActionResults.length / 50))) * 50);
-    const stageAFilterBar = results.length > 0 && <div className="flex flex-row-reverse flex-wrap items-center gap-3 rounded-xl border border-slate-200 bg-white p-3"><input value={resultNameSearch} onChange={event => { setResultNameSearch(event.target.value); setStageAPage(1); }} placeholder="بحث برقم الفاتورة أو العميل أو المرجع..." className="order-1 min-w-[240px] flex-1 rounded-lg border border-slate-200 px-4 py-3 text-sm outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-100" /><select value={stageASourceFilter} onChange={event => { setStageASourceFilter(event.target.value); setStageAPage(1); }} className="order-2 rounded-lg border border-slate-200 bg-white px-4 py-3 text-sm outline-none"><option value="all">كل الوسائل</option><option value="بنك فلسطين">بنك فلسطين</option><option value="محفظة تجارية">محفظة تجارية</option><option value="محفظة محمود">محفظة محمود</option><option value="جوال بي">جوال بي</option><option value="فيزا">فيزا</option></select><button onClick={() => setSelectedResultIds(new Set(visibleActionResults.map(result => resultKey(result))))} className="order-3 rounded-lg border border-slate-200 bg-white px-5 py-3 text-sm font-medium hover:bg-slate-50">تحديد الكل</button></div>;
+    const stageAFilterBar = results.length > 0 && <div className="flex flex-row-reverse flex-wrap items-center gap-3 rounded-xl border border-slate-200 bg-white p-3"><input value={resultNameSearch} onChange={event => { setResultNameSearch(event.target.value); setStageAPage(1); }} placeholder="بحث برقم الفاتورة أو العميل أو المرجع..." className="order-1 min-w-[240px] flex-1 rounded-lg border border-slate-200 px-4 py-3 text-sm outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-100" /><select value={stageASourceFilter} onChange={event => { setStageASourceFilter(event.target.value); setStageAPage(1); }} className="order-2 rounded-lg border border-slate-200 bg-white px-4 py-3 text-sm outline-none"><option value="all">كل الوسائل</option><option value="بنك فلسطين">بنك فلسطين</option><option value="بال بي">بال بي</option><option value="محفظة شخصية">محفظة شخصية</option><option value="جوال بي">جوال بي</option><option value="فيزا">فيزا</option>{customInvoicePlatforms.map(platform => <option key={platform.id} value={platform.name}>{platform.name}</option>)}</select><details className="order-3 relative"><summary className="cursor-pointer list-none rounded-lg border px-3 py-2 text-sm">{resultMinAmount || resultMaxAmount ? "نطاق المبلغ · مفعّل" : "نطاق المبلغ"}</summary><div className="absolute left-0 z-30 mt-1 flex w-64 gap-2 rounded-lg border bg-white p-2 shadow-lg"><input type="number" min="0" value={resultMinAmount} onChange={event => { setResultMinAmount(event.target.value); setStageAPage(1); }} placeholder="من مبلغ" className="w-1/2 rounded border px-2 py-1.5 text-xs" /><input type="number" min="0" value={resultMaxAmount} onChange={event => { setResultMaxAmount(event.target.value); setStageAPage(1); }} placeholder="إلى مبلغ" className="w-1/2 rounded border px-2 py-1.5 text-xs" /></div></details><button onClick={() => setSelectedResultIds(new Set(visibleActionResults.map(result => resultKey(result))))} className="order-4 rounded-lg border border-slate-200 bg-white px-5 py-3 text-sm font-medium hover:bg-slate-50">تحديد الصفحة</button></div>;
     const inlineResultActions = results.length > 0 && <div className="space-y-2 rounded-xl border border-slate-200 bg-white p-3"><div className="flex items-center justify-between"><strong className="text-xs">خيارات الفواتير</strong><span className="text-xs text-slate-500">حدد الفاتورة لإظهار خياراتها</span></div>{pagedActionResults.map(result => <div key={`inline-${resultKey(result)}`} className="flex flex-wrap items-center gap-2 rounded-lg border border-slate-100 bg-slate-50 p-2"><input type="checkbox" checked={selectedResultIds.has(resultKey(result))} onChange={() => toggleResultSelection(result)} /><span className="min-w-48 flex-1 text-xs font-medium">{result.originalName}<span className="mr-2 text-slate-500">{fmtNum(result.amount)}</span></span>{selectedResultIds.has(resultKey(result)) && <><button onClick={() => updateResultStatus(result, true)} className="rounded border border-green-200 bg-green-50 px-2 py-1 text-[10px] text-green-700">اعتماد</button><button onClick={() => updateResultStatus(result, false)} className="rounded border border-red-200 bg-red-50 px-2 py-1 text-[10px] text-red-700">رفض</button><select onChange={event => replaceMatchedDatabase(result, event.target.value)} defaultValue="-1" className="max-w-40 rounded border bg-white px-2 py-1 text-[10px]"><option value="-1">تغيير إلى شخص آخر</option>{databaseRows.map((row, index) => <option key={index} value={index}>{String(row[databaseMap.name] ?? "")} · {String(row[databaseMap.amount] ?? "")}</option>)}</select><button onClick={() => { if (window.confirm("حذف الفاتورة وسجلها من النتائج؟")) deleteMatchedPair(result); }} className="rounded border border-slate-300 bg-slate-100 px-2 py-1 text-[10px] text-slate-700">حذف الاثنين</button></>}</div>)}</div>;
   const stageAPageSize = 20;
   const totalStageAPages = Math.max(1, Math.ceil(allActionResults.length / stageAPageSize));
@@ -515,11 +903,19 @@ function StageAPlatform({ onBack, onTransferToB, onTransferVisaToC, onSafeActivi
   const replaceMatchedDatabase = (result: StageAResult, value: string) => {
     const row = databaseRows[Number(value)];
     if (!row) return;
+    const invoiceTotal = Number.parseFloat(String(row[databaseMap.invoiceTotal] ?? "").replace(/,/g, "")) || 0;
+    const cashAmount = Number.parseFloat(String(row[databaseMap.cashAmount] ?? "").replace(/,/g, "")) || 0;
+    const checkAmount = Number.parseFloat(String(row[databaseMap.checkAmount] ?? "").replace(/,/g, "")) || 0;
+    const cardAmount = Number.parseFloat(String(row[databaseMap.amount] ?? "").replace(/,/g, "")) || 0;
+    const debtAmount = Number.parseFloat(String(row[databaseMap.debtAmount] ?? "").replace(/,/g, "")) || 0;
     setResults(previous => previous.map(item => item === result ? {
       ...item,
+      invoiceTotal, cashAmount, checkAmount, debtAmount,
+      discountAmount: Math.max(0, Math.round((invoiceTotal - cashAmount - checkAmount - cardAmount - debtAmount) * 100) / 100),
       databaseName: String(row[databaseMap.name] ?? ""),
       databaseAmount: Number.parseFloat(String(row[databaseMap.amount] ?? "").replace(/,/g, "")) || 0,
       userId: String(row[databaseMap.userId] ?? ""),
+      invoiceDate: stageAEnglishDate(row[databaseMap.date]),
       registrationTime: String(row[databaseMap.registrationTime] ?? ""),
       customerNumber: String(row[databaseMap.customerNumber] ?? ""),
       invoiceNumber: String(row[databaseMap.invoiceNumber] ?? ""),
@@ -534,39 +930,162 @@ function StageAPlatform({ onBack, onTransferToB, onTransferVisaToC, onSafeActivi
 
   const matchedActionsPanel = results.length > 0 && <div className="rounded-xl border border-green-200 bg-green-50/40 p-3"><div className="mb-2 flex flex-wrap items-center gap-2"><strong className="text-xs text-green-800">المطابقات وإجراءاتها</strong><input value={matchedSearch} onChange={event => setMatchedSearch(event.target.value)} placeholder="بحث المطابقات بالاسم أو المبلغ" className="min-w-56 flex-1 rounded border bg-white px-2 py-1.5 text-[11px]" /><span className="text-xs text-green-700">{visibleMatchedResults.length} مطابقة</span></div><div className="space-y-2">{visibleMatchedResults.map(result => <div key={`matched-${resultKey(result)}`} className="flex flex-wrap items-center gap-2 rounded-lg border border-green-100 bg-white p-2"><input type="checkbox" checked={selectedMatchedIds.has(resultKey(result))} onChange={() => setSelectedMatchedIds(previous => { const next = new Set(previous); const key = resultKey(result); if (next.has(key)) next.delete(key); else next.add(key); return next; })} /><span className="min-w-44 flex-1 text-xs font-medium">{result.originalName}<span className="mr-2 text-slate-500">{fmtNum(result.amount)}</span></span><span className="text-[11px] text-green-700">↔ {result.databaseName} ({fmtNum(result.databaseAmount)})</span><select value={databaseRows.findIndex(row => String(row[databaseMap.name] ?? "") === result.databaseName && Number.parseFloat(String(row[databaseMap.amount] ?? "").replace(/,/g, "")) === result.databaseAmount)} onChange={event => replaceMatchedDatabase(result, event.target.value)} className="max-w-36 rounded border px-2 py-1 text-[10px]"><option value="-1">اختيار شخص آخر</option>{databaseRows.map((row, index) => <option key={index} value={index}>{String(row[databaseMap.name] ?? "")} · {String(row[databaseMap.amount] ?? "")}</option>)}</select><button onClick={() => rejectMatched(result)} className="rounded border border-red-200 bg-red-50 px-2 py-1 text-[10px] text-red-700">✕ رفض</button><button onClick={() => deleteMatchedPair(result)} className="rounded border border-slate-300 bg-slate-100 px-2 py-1 text-[10px] text-slate-700">حذف الاثنين</button></div>)}</div></div>;
 
-  const selectionPanel = results.length > 0 && <div className="rounded-xl border border-slate-200 bg-white p-3"><div className="mb-2 flex flex-wrap items-center gap-2"><strong className="text-xs">إجراءات الفواتير</strong><span className="text-xs text-slate-500">محدد: {selectedResultIds.size}</span><input value={resultNameSearch} onChange={event => setResultNameSearch(event.target.value)} placeholder="بحث بالاسم أو البيان" className="min-w-48 flex-1 rounded border px-2 py-1.5 text-[11px]" /><input value={resultAmountSearch} onChange={event => setResultAmountSearch(event.target.value)} placeholder="بحث بالمبلغ" inputMode="decimal" className="w-28 rounded border px-2 py-1.5 text-[11px]" /></div><div className="space-y-2">{visibleActionResults.map(result => <div key={resultKey(result)} className="flex flex-wrap items-center gap-2 rounded-lg border border-slate-100 bg-slate-50 p-2"><input type="checkbox" checked={selectedResultIds.has(resultKey(result))} onChange={() => toggleResultSelection(result)} /><span className="min-w-48 flex-1 text-xs font-medium">{result.originalName}<span className="mr-2 text-slate-500">{fmtNum(result.amount)}</span></span><button onClick={() => updateResultStatus(result, true)} className="rounded border border-green-200 bg-green-50 px-2 py-1 text-[10px] text-green-700">اعتماد</button><button onClick={() => updateResultStatus(result, false)} className="rounded border border-red-200 bg-red-50 px-2 py-1 text-[10px] text-red-700">رفض</button><button onClick={() => { onTransferToB([result]); setSelectedResultIds(previous => { const next = new Set(previous); next.delete(resultKey(result)); return next; }); }} disabled={result.category === "فيزا"} className="rounded bg-emerald-600 px-2 py-1 text-[10px] text-white disabled:opacity-40">نقل B</button><button onClick={() => { onTransferVisaToC([result]); setSelectedResultIds(previous => { const next = new Set(previous); next.delete(resultKey(result)); return next; }); }} disabled={result.category !== "فيزا"} className="rounded bg-amber-600 px-2 py-1 text-[10px] text-white disabled:opacity-40">نقل C</button></div>)}</div></div>;
+  const selectionPanel = results.length > 0 && <div className="rounded-xl border border-slate-200 bg-white p-3"><div className="mb-2 flex flex-wrap items-center gap-2"><strong className="text-xs">إجراءات الفواتير</strong><span className="text-xs text-slate-500">محدد: {selectedResultIds.size}</span><input value={resultNameSearch} onChange={event => setResultNameSearch(event.target.value)} placeholder="بحث بالاسم أو البيان" className="min-w-48 flex-1 rounded border px-2 py-1.5 text-[11px]" /><input value={resultAmountSearch} onChange={event => setResultAmountSearch(event.target.value)} placeholder="بحث بالمبلغ" inputMode="decimal" className="w-28 rounded border px-2 py-1.5 text-[11px]" /></div><div className="space-y-2">{visibleActionResults.map(result => <div key={resultKey(result)} className="flex flex-wrap items-center gap-2 rounded-lg border border-slate-100 bg-slate-50 p-2"><input type="checkbox" checked={selectedResultIds.has(resultKey(result))} onChange={() => toggleResultSelection(result)} /><span className="min-w-48 flex-1 text-xs font-medium">{result.originalName}<span className="mr-2 text-slate-500">{fmtNum(result.amount)}</span></span><button onClick={() => updateResultStatus(result, true)} className="rounded border border-green-200 bg-green-50 px-2 py-1 text-[10px] text-green-700">اعتماد</button><button onClick={() => updateResultStatus(result, false)} className="rounded border border-red-200 bg-red-50 px-2 py-1 text-[10px] text-red-700">رفض</button><button onClick={() => { onTransferToB([result], databaseSummary); setSelectedResultIds(previous => { const next = new Set(previous); next.delete(resultKey(result)); return next; }); }} className="rounded bg-emerald-600 px-2 py-1 text-[10px] text-white">نقل B</button><button onClick={() => { onTransferVisaToC([result]); setSelectedResultIds(previous => { const next = new Set(previous); next.delete(resultKey(result)); return next; }); }} className="rounded bg-amber-600 px-2 py-1 text-[10px] text-white">نقل C</button></div>)}</div></div>;
 
-  const renderInvoice = (source: "bank" | "wallet" | "visa", label: string) => (
+  const renderInvoice = (source: string, label: string) => (
     <div className="space-y-3 rounded-xl border border-slate-200 bg-white p-4 shadow-[0_4px_12px_rgba(30,64,175,0.08)]">
       <h3 className="text-sm font-bold text-slate-800">{label}</h3>
       {!!invoiceHeaders[source].length && (
         <label className="flex w-fit cursor-pointer items-center gap-2 text-xs text-slate-600">
           <input type="checkbox" checked={invoiceSwaps[source]} onChange={event => setInvoiceSwaps(prev => ({ ...prev, [source]: event.target.checked }))} className="rounded" />
-          عكس المدين والدائن
+          {invoiceSwaps[source] ? "المستلم مدين والمدفوع دائن" : "المدفوع مدين والمستلم دائن"}
         </label>
       )}
-      <DropZone file={invoiceFiles[source]} onFile={file => loadInvoices(source, file)} onClear={() => { setInvoiceFiles(prev => ({ ...prev, [source]: null })); setInvoiceHeaders(prev => ({ ...prev, [source]: [] })); setInvoiceRows(prev => ({ ...prev, [source]: [] })); }} />
+      <DropZone file={invoiceFiles[source] ?? null} multiple onFile={file => void loadInvoices(source, [file])} onFiles={files => void loadInvoices(source, files)} onClear={() => { setInvoiceFiles(prev => ({ ...prev, [source]: null })); setInvoiceFileNames(prev => ({ ...prev, [source]: "" })); setInvoiceFileCounts(prev => ({ ...prev, [source]: 0 })); setInvoiceHeaders(prev => ({ ...prev, [source]: [] })); setInvoiceRows(prev => ({ ...prev, [source]: [] })); }} />
+      {!!invoiceFileNames[source] && <p className="text-xs text-emerald-700">{invoiceFiles[source] ? `${invoiceFileCounts[source] || 1} ملف${(invoiceFileCounts[source] || 1) > 1 ? "ات مدمجة" : ""}: ` : "بيانات الملفات المستعادة: "}{invoiceFileNames[source]}</p>}
       {!!invoiceHeaders[source].length && <>
+        <div className="flex flex-wrap items-center gap-3">
+          <label className="flex items-center gap-2 text-xs text-slate-600"><input type="checkbox" checked={invoiceRemoveRepeatedHeaders[source] ?? true} onChange={event => setInvoiceRemoveRepeatedHeaders(prev => ({ ...prev, [source]: event.target.checked }))} />إزالة الترويسات المكررة</label>
+          <button type="button" onClick={() => processInvoiceHeaders(source)} disabled={invoiceProcessing[source]} className="rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-xs font-semibold text-blue-800 hover:bg-blue-100 disabled:opacity-50">معالجة الملف وإزالة الترويسات والأرصدة</button>
+          <label className={`cursor-pointer rounded-lg border px-3 py-2 text-xs font-medium hover:bg-slate-50 ${invoiceProcessing[source] ? "pointer-events-none opacity-50" : ""}`}>إضافة ملف للدمج<input type="file" multiple accept=".xlsx,.xls,.csv" disabled={invoiceProcessing[source]} className="hidden" onChange={event => { const files = Array.from(event.currentTarget.files ?? []); if (files.length) void loadInvoices(source, files, true); event.currentTarget.value = ""; }} /></label>
+          <button type="button" onClick={() => exportInvoiceSheet(source)} className="rounded-lg bg-emerald-50 px-3 py-2 text-xs font-medium text-emerald-700 hover:bg-emerald-100"><Download className="ml-1 inline h-3.5 w-3.5" />تنزيل Excel منظف</button>
+          {!!invoiceFileSnapshots[source]?.length && <div className="relative">
+            <button type="button" onClick={() => setShowInvoiceSnapshots(previous => ({ ...previous, [source]: !previous[source] }))} className="rounded-lg border bg-slate-50 px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-100"><RotateCcw className="ml-1 inline h-3.5 w-3.5" />استرجاع ملف سابق ({invoiceFileSnapshots[source].length})</button>
+            {showInvoiceSnapshots[source] && <>
+              <button type="button" aria-label="إغلاق قائمة الملفات السابقة" className="fixed inset-0 z-10 cursor-default" onClick={() => setShowInvoiceSnapshots(previous => ({ ...previous, [source]: false }))} />
+              <div className="absolute left-0 z-20 mt-1 max-h-64 w-72 overflow-y-auto rounded-lg border bg-white py-1 shadow-lg">
+                {invoiceFileSnapshots[source].map((snapshot, index) => <button key={`${snapshot.fileName}-${index}`} type="button" onClick={() => restoreInvoiceSnapshot(source, snapshot)} className="w-full px-3 py-2 text-right text-xs hover:bg-blue-50">
+                  <span className="block truncate font-medium">{snapshot.fileName}</span><span className="mt-1 block text-[10px] text-slate-500">{snapshot.fileCount} ملف · {snapshot.rows.length} حركة</span>
+                </button>)}
+              </div>
+            </>}
+          </div>}
+        </div>
         <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
           <Sel label="التاريخ" headers={invoiceHeaders[source]} value={invoiceMaps[source].date} onChange={value => setInvoiceMaps(prev => ({ ...prev, [source]: { ...prev[source], date: value } }))} />
+          <Sel label="الساعة" headers={invoiceHeaders[source]} value={invoiceMaps[source].registrationTime} onChange={value => setInvoiceMaps(prev => ({ ...prev, [source]: { ...prev[source], registrationTime: value } }))} />
           <Sel label="البيان / اسم الزبون" headers={invoiceHeaders[source]} value={invoiceMaps[source].name} onChange={value => setInvoiceMaps(prev => ({ ...prev, [source]: { ...prev[source], name: value } }))} />
-          <Sel label="المبالغ المدفوعة (Debit)" headers={invoiceHeaders[source]} value={invoiceMaps[source].paidAmount} onChange={value => setInvoiceMaps(prev => ({ ...prev, [source]: { ...prev[source], paidAmount: value } }))} />
-          <Sel label="المبالغ المستلمة (Credit)" headers={invoiceHeaders[source]} value={invoiceMaps[source].receivedAmount} onChange={value => setInvoiceMaps(prev => ({ ...prev, [source]: { ...prev[source], receivedAmount: value } }))} />
+          <Sel label="المبالغ المدفوعة (Credit)" headers={invoiceHeaders[source]} value={invoiceMaps[source].paidAmount} onChange={value => setInvoiceMaps(prev => ({ ...prev, [source]: { ...prev[source], paidAmount: value } }))} />
+          <Sel label="المبالغ المستلمة (Debit)" headers={invoiceHeaders[source]} value={invoiceMaps[source].receivedAmount} onChange={value => setInvoiceMaps(prev => ({ ...prev, [source]: { ...prev[source], receivedAmount: value } }))} />
           <Sel label="نوع الحساب" headers={invoiceHeaders[source]} value={invoiceMaps[source].accountType} onChange={value => setInvoiceMaps(prev => ({ ...prev, [source]: { ...prev[source], accountType: value } }))} />
+          <Sel label="رقم المستخدم" headers={invoiceHeaders[source]} value={invoiceMaps[source].userId} onChange={value => setInvoiceMaps(prev => ({ ...prev, [source]: { ...prev[source], userId: value } }))} />
           <Sel label="المرجع / رقم الفاتورة" headers={invoiceHeaders[source]} value={invoiceMaps[source].reference} onChange={value => setInvoiceMaps(prev => ({ ...prev, [source]: { ...prev[source], reference: value } }))} />
         </div>
       </>}
     </div>
   );
 
+  const stageATransferResults = results.filter(result => selectedResultIds.size
+    ? selectedResultIds.has(resultKey(result))
+    : result.matched);
+  const databaseInvoiceRows = databaseSummary.databaseInvoices ?? [];
+  const databaseInvoicePageSize = 50;
+  const databaseInvoicePageCount = Math.max(1, Math.ceil(databaseInvoiceRows.length / databaseInvoicePageSize));
+  const visibleDatabaseInvoices = databaseInvoiceRows.slice(
+    (Math.min(databaseInvoicePage, databaseInvoicePageCount) - 1) * databaseInvoicePageSize,
+    Math.min(databaseInvoicePage, databaseInvoicePageCount) * databaseInvoicePageSize
+  );
+  const clearAllStageASelection = () => setSelectedResultIds(new Set());
+  const selectUnmatchedStageAResults = () => setSelectedResultIds(new Set(results.filter(result => !result.matched).map(result => resultKey(result))));
+  const addCustomInvoicePlatform = () => {
+    const name = newInvoicePlatformName.trim();
+    if (!name) return;
+    const id = `custom-${Date.now()}`;
+    setCustomInvoicePlatforms(platforms => [...platforms, { id, name }]);
+    setInvoiceFiles(files => ({ ...files, [id]: null }));
+    setInvoiceFileCounts(counts => ({ ...counts, [id]: 0 }));
+    setInvoiceFileSnapshots(snapshots => { const next = { ...snapshots }; delete next[id]; return next; });
+    setShowInvoiceSnapshots(open => { const next = { ...open }; delete next[id]; return next; });
+    setInvoiceHeaders(headers => ({ ...headers, [id]: [] }));
+    setInvoiceRows(rows => ({ ...rows, [id]: [] }));
+    setInvoiceMaps(maps => ({ ...maps, [id]: { ...invoiceMapDefaults } }));
+    setInvoiceSwaps(swaps => ({ ...swaps, [id]: true }));
+    setNewInvoicePlatformName("");
+  };
+
   return <div dir="rtl" className="min-h-screen bg-slate-50 p-6 text-slate-900"><div className="mx-auto max-w-6xl space-y-5">
-    <div className="flex flex-wrap items-center justify-between gap-3"><button onClick={onBack} className="flex items-center gap-1 text-sm text-slate-500 hover:text-blue-600"><ChevronLeft className="h-4 w-4" />العودة للمنصة الرئيسية</button><div className="flex items-center gap-3"><span className="flex h-12 w-12 items-center justify-center rounded-xl bg-blue-600 text-2xl font-black text-white shadow-sm">A</span><div><h1 className="text-2xl font-black text-blue-700">فرز الفواتير حسب قاعدة البيانات</h1><p className="mt-1 text-sm text-slate-500">مطابقة الاسم والمبلغ مع قاعدة البيانات، ثم استخراج المطابقات ومشاكل أخرى.</p></div></div><div className="flex gap-2"><button onClick={runStageA} className="flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700"><Sparkles className="h-4 w-4" />تشغيل الفرز</button>{results.length > 0 && <button onClick={exportStageA} className="flex items-center gap-2 rounded-lg bg-green-600 px-4 py-2 text-sm font-medium text-white hover:bg-green-700"><Download className="h-4 w-4" />تصدير Excel</button>}</div></div>
+    <div className="flex flex-wrap items-center justify-between gap-3"><button onClick={onBack} className="flex items-center gap-1 text-sm text-slate-500 hover:text-blue-600"><ChevronLeft className="h-4 w-4" />العودة للمنصة الرئيسية</button><div className="flex items-center gap-3"><span className="flex h-12 w-12 items-center justify-center rounded-xl bg-blue-600 text-2xl font-black text-white shadow-sm">A</span><div><h1 className="text-2xl font-black text-blue-700">فرز الفواتير حسب قاعدة البيانات</h1><p className="mt-1 text-sm text-slate-500">مطابقة الاسم والمبلغ مع قاعدة البيانات، ثم استخراج المطابقات ومشاكل أخرى.</p></div></div><div className="flex gap-2"><div className="relative"><button onClick={() => setShowDeleteMenu(open => !open)} className="flex items-center gap-1 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700"><Trash2 className="h-4 w-4" />أدوات الحذف<ChevronDown className="h-3 w-3" /></button>{showDeleteMenu && <><button type="button" aria-label="إغلاق القائمة" className="fixed inset-0 z-10 cursor-default" onClick={() => setShowDeleteMenu(false)} /><div className="absolute left-0 z-20 mt-1 w-56 rounded-lg border bg-white p-1 shadow-lg"><button onClick={() => { setShowDeleteMenu(false); clearStageASession(); }} className="w-full rounded px-3 py-2 text-right text-xs text-red-700 hover:bg-red-50">مسح ملفات ونتائج المرحلة A</button></div></>}</div><button onClick={runStageA} className="flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700"><Sparkles className="h-4 w-4" />تشغيل الفرز</button>{results.length > 0 && <button onClick={exportStageA} className="flex items-center gap-2 rounded-lg bg-green-600 px-4 py-2 text-sm font-medium text-white hover:bg-green-700"><Download className="h-4 w-4" />تصدير Excel</button>}</div></div>
     <div className="rounded-xl border border-blue-200 bg-blue-50 p-4 text-sm text-blue-900">تتم المطابقة بالاسم والمبلغ معاً. كل صف في قاعدة البيانات يُستهلك مرة واحدة، لذلك يمكن معالجة فاتورتين للاسم نفسه بمبلغين مختلفين بشكل صحيح. تُزال عبارة <strong>بطاقة ائتمان</strong> والفاصل <strong>/</strong> من بداية البيان، مع إبقاء بقية الاسم والرموز والأرقام.</div>
     {error && <div className="rounded-lg bg-red-100 p-3 text-sm text-red-800">{error}</div>}{stageAFilterBar}
-    <div className="space-y-3 rounded-2xl border border-blue-100 bg-white p-5 shadow-sm"><div className="flex items-center justify-between"><h2 className="text-base font-bold text-slate-800">ملف قاعدة البيانات</h2><span className="rounded-full bg-blue-50 px-3 py-1 text-xs font-semibold text-blue-700">المصدر الأساسي للفرز</span></div><DropZone file={databaseFile} onFile={loadDatabase} onClear={() => { setDatabaseFile(null); setDatabaseHeaders([]); setDatabaseRows([]); }} />{!!databaseHeaders.length && <div className="grid grid-cols-1 gap-2 sm:grid-cols-3"><Sel label="اسم الزبون (البيان من قاعدة البيانات)" headers={databaseHeaders} value={databaseMap.name} onChange={value => setDatabaseMap(prev => ({ ...prev, name: value }))} /><Sel label="مدفوع بالكارد (مبلغ قاعدة البيانات)" headers={databaseHeaders} value={databaseMap.amount} onChange={value => setDatabaseMap(prev => ({ ...prev, amount: value }))} /><Sel label="رقم المستخدم" headers={databaseHeaders} value={databaseMap.userId} onChange={value => setDatabaseMap(prev => ({ ...prev, userId: value }))} /><Sel label="الساعة" headers={databaseHeaders} value={databaseMap.registrationTime} onChange={value => setDatabaseMap(prev => ({ ...prev, registrationTime: value }))} /><Sel label="رقم الزبون" headers={databaseHeaders} value={databaseMap.customerNumber} onChange={value => setDatabaseMap(prev => ({ ...prev, customerNumber: value }))} /><Sel label="رقم الفاتورة" headers={databaseHeaders} value={databaseMap.invoiceNumber} onChange={value => setDatabaseMap(prev => ({ ...prev, invoiceNumber: value }))} /></div>}</div>
-    <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">{renderInvoice("bank", "ملف فواتير بنك فلسطين")}{renderInvoice("wallet", "ملف فواتير المحفظة التجارية")}{renderInvoice("visa", "ملف فواتير الفيزا")}</div>
-    {inlineResultActions}{paginationControls}
-    {!!results.length && <div className="overflow-hidden rounded-xl border border-slate-200 bg-white"><div className="flex flex-wrap items-center justify-between gap-3 border-b bg-slate-50 px-4 py-3 text-sm"><div className="flex flex-wrap items-center gap-1"><strong className="ml-3">نتائج الفرز</strong>{([ ["all", "الكل"], ["matched", "المطابق"], ["unmatched", "غير المطابق"], ["wallet", "محفظة"], ["visa", "فيزا"] ] as const).map(([value, label]) => <button key={value} onClick={() => setResultFilter(value)} className={`rounded-lg px-2.5 py-1.5 text-xs ${resultFilter === value ? "bg-blue-600 text-white" : "bg-white text-slate-600 hover:bg-blue-50"}`}>{label}</button>)}</div><div className="flex items-center gap-2"><span className="text-xs text-slate-500">مطابق: {results.filter(result => result.matched).length} · غير مطابق: {results.filter(result => !result.matched).length} · محفظة: {results.filter(result => result.category === "محفظة").length} · فيزا: {results.filter(result => result.category === "فيزا").length}</span>{results.some(result => result.matched) && <button onClick={() => onTransferToB(results.filter(result => result.matched))} className="rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-700">ترحيل المطابق إلى B ←</button>}{results.some(result => result.category === "فيزا") && <button onClick={() => onTransferVisaToC(results.filter(result => result.category === "فيزا"))} className="rounded-lg bg-amber-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-amber-700">ترحيل كل الفيزا إلى C ←</button>}</div></div><div className="overflow-x-auto"><table className="w-full text-sm"><thead className="bg-slate-100 text-xs"><tr><th className="p-3 text-right">المصدر الأصلي</th><th className="p-3 text-right">التصنيف</th><th className="p-3 text-right">البيان الأصلي</th><th className="p-3 text-right">اسم الزبون من قاعدة البيانات</th><th className="p-3 text-right">مبلغ الفاتورة</th><th className="p-3 text-right">مدفوع بالكارد من قاعدة البيانات</th><th className="p-3 text-right">نوع الحساب</th><th className="p-3 text-right">الحالة</th><th className="p-3 text-right">ملاحظة</th></tr></thead><tbody>{results.filter(result => resultFilter === "all" || (resultFilter === "matched" ? result.matched : resultFilter === "unmatched" ? !result.matched : result.category === (resultFilter === "wallet" ? "محفظة" : "فيزا"))).map(result => <tr key={`${result.source}-${result.id}`} className={`border-t ${result.matched ? "bg-green-50/30" : "bg-red-50/30"}`}><td className="p-3">{result.source}</td><td className="p-3 font-semibold"><span className={result.category === "فيزا" ? "text-amber-700" : "text-emerald-700"}>{result.category}</span>{result.categoryIssue && <div className="text-[10px] font-normal text-orange-700">{result.categoryIssue}</div>}</td><td className="p-3 font-medium">{result.originalName}</td><td className="p-3">{result.databaseName || "—"}</td><td className="p-3 font-mono">{fmtNum(result.amount)}</td><td className="p-3 font-mono">{result.databaseName ? fmtNum(result.databaseAmount) : "—"}</td><td className="p-3">{result.accountType || "—"}</td><td className={`p-3 font-semibold ${result.matched ? "text-green-700" : "text-red-700"}`}>{result.matched ? "مطابق" : "غير مطابق"}</td><td className="p-3 text-xs text-orange-700">{result.categoryIssue || result.issue || "—"}</td></tr>)}</tbody></table></div></div>}
+    <div className="space-y-3 rounded-2xl border border-blue-100 bg-white p-5 shadow-sm">
+      <div className="flex items-center justify-between"><h2 className="text-base font-bold text-slate-800">ملف قاعدة البيانات</h2><span className="rounded-full bg-blue-50 px-3 py-1 text-xs font-semibold text-blue-700">المصدر الأساسي للفرز</span></div>
+      <DropZone file={databaseFile} onFile={loadDatabase} onClear={() => { setDatabaseFile(null); setDatabaseFileName(""); setDatabaseHeaders([]); setDatabaseRows([]); }} />
+      {!databaseFile && databaseFileName && <p className="text-xs text-emerald-700">بيانات الملف المستعادة: {databaseFileName}</p>}
+      {!!databaseHeaders.length && <>
+        <div className="flex flex-wrap items-center gap-3">
+          <label className="flex items-center gap-2 text-xs text-slate-700"><input type="checkbox" checked={removeRepeatedHeaders} onChange={event => setRemoveRepeatedHeaders(event.target.checked)} />إزالة صفوف الترويسة المكررة</label>
+          <button type="button" onClick={processDatabaseHeaders} className="rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-xs font-semibold text-blue-800 hover:bg-blue-100">معالجة ملف قاعدة البيانات</button>
+        </div>
+        <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+          <Sel label="اسم الزبون" headers={databaseHeaders} value={databaseMap.name} onChange={value => setDatabaseMap(prev => ({ ...prev, name: value }))} />
+          <Sel label="مدفوع بالكارد / تطبيق" headers={databaseHeaders} value={databaseMap.amount} onChange={value => setDatabaseMap(prev => ({ ...prev, amount: value }))} />
+          <Sel label="إجمالي مبلغ الفاتورة" headers={databaseHeaders} value={databaseMap.invoiceTotal} onChange={value => setDatabaseMap(prev => ({ ...prev, invoiceTotal: value }))} />
+          <Sel label="مدفوع نقداً" headers={databaseHeaders} value={databaseMap.cashAmount} onChange={value => setDatabaseMap(prev => ({ ...prev, cashAmount: value }))} />
+          <Sel label="مدفوع بشيك" headers={databaseHeaders} value={databaseMap.checkAmount} onChange={value => setDatabaseMap(prev => ({ ...prev, checkAmount: value }))} />
+          <Sel label="المتبقي على الزبون / الدين" headers={databaseHeaders} value={databaseMap.debtAmount} onChange={value => setDatabaseMap(prev => ({ ...prev, debtAmount: value }))} />
+          <Sel label="المستخدم / رقم المستخدم" headers={databaseHeaders} value={databaseMap.userId} onChange={value => setDatabaseMap(prev => ({ ...prev, userId: value }))} />
+          <Sel label="تاريخ الفاتورة" headers={databaseHeaders} value={databaseMap.date} onChange={value => setDatabaseMap(prev => ({ ...prev, date: value }))} />
+          <Sel label="الساعة" headers={databaseHeaders} value={databaseMap.registrationTime} onChange={value => setDatabaseMap(prev => ({ ...prev, registrationTime: value }))} />
+          <Sel label="رقم الزبون" headers={databaseHeaders} value={databaseMap.customerNumber} onChange={value => setDatabaseMap(prev => ({ ...prev, customerNumber: value }))} />
+          <Sel label="رقم الفاتورة" headers={databaseHeaders} value={databaseMap.invoiceNumber} onChange={value => setDatabaseMap(prev => ({ ...prev, invoiceNumber: value }))} />
+        </div>
+      </>}
+    </div>
+    <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">{renderInvoice("bank", "ملف فواتير بنك فلسطين")}{renderInvoice("wallet", "ملف فواتير بال بي")}{renderInvoice("jawwal", "ملف فواتير جوال بي")}{renderInvoice("visa", "ملف فواتير الفيزا")}{customInvoicePlatforms.map(platform => <div key={platform.id}>{renderInvoice(platform.id, `فواتير ${platform.name}`)}<button type="button" onClick={() => setCustomInvoicePlatforms(items => items.filter(item => item.id !== platform.id))} className="mt-1 rounded px-2 py-1 text-xs text-red-700 hover:bg-red-50">حذف المنصة</button></div>)}</div>
+    <div className="flex flex-wrap items-center gap-2 rounded-xl border border-slate-200 bg-white p-3"><input value={newInvoicePlatformName} onChange={event => setNewInvoicePlatformName(event.target.value)} placeholder="اسم منصة إضافية" className="min-w-48 flex-1 rounded-lg border px-3 py-2 text-sm" /><button type="button" onClick={addCustomInvoicePlatform} disabled={!newInvoicePlatformName.trim()} className="rounded-lg bg-slate-800 px-4 py-2 text-sm font-semibold text-white hover:bg-slate-900 disabled:opacity-50">إضافة منصة</button></div>
+    {paginationControls}
+    {!!databaseSummary.databaseInvoiceCount && <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-6">
+      {([
+        ["عدد الفواتير", databaseSummary.databaseInvoiceCount],
+        ["إجمالي الفواتير", databaseSummary.databaseInvoiceTotal],
+        ["النقدي", databaseSummary.databaseCashTotal],
+        ["الشيك", databaseSummary.databaseInvoices?.reduce((sum, invoice) => sum + invoice.checkAmount, 0) ?? 0],
+        ["المتبقي على الزبائن", databaseSummary.databaseDebtTotal],
+        ["مدفوع بالكارد / التطبيقات", databaseSummary.databaseCardTotal],
+      ] as const).map(([label, value]) => label === "عدد الفواتير"
+        ? <button key={label} type="button" onClick={() => { setDatabaseInvoicePage(1); setShowDatabaseInvoices(true); }} className="rounded-xl border border-blue-200 bg-white p-3 text-right hover:border-blue-400 hover:bg-blue-50"><div className="text-xs text-slate-500">{label} · عرض التفاصيل</div><div className="mt-1 font-mono text-sm font-bold">{value}</div></button>
+        : <div key={label} className="rounded-xl border border-slate-200 bg-white p-3"><div className="text-xs text-slate-500">{label}</div><div className="mt-1 font-mono text-sm font-bold">{fmtNum(value)}</div></div>)}
+    </div>}
+    {!!results.length && <div className="overflow-hidden rounded-xl border border-slate-200 bg-white">
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b bg-slate-50 px-4 py-3 text-sm">
+        <div className="flex flex-wrap items-center gap-1"><strong className="ml-3">نتائج الفرز</strong>{([["all", "الكل"], ["matched", "المطابق"], ["unmatched", "غير المطابق"], ["wallet", "محفظة"], ["جوال بي", "جوال بي"], ["visa", "فيزا"]] as const).map(([value, label]) => <button key={value} onClick={() => setResultFilter(value)} className={`rounded-lg px-2.5 py-1.5 text-xs ${resultFilter === value ? "bg-blue-600 text-white" : "bg-white text-slate-600 hover:bg-blue-50"}`}>{label}</button>)}</div>
+        <div className="flex flex-wrap items-center gap-2"><span className="text-xs text-slate-500">مطابق: {results.filter(result => result.matched).length} · غير مطابق: {results.filter(result => !result.matched).length} · المحدد: {selectedResultIds.size}</span>
+          <button onClick={selectUnmatchedStageAResults} disabled={!results.some(result => !result.matched)} className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-1.5 text-xs font-medium text-amber-800 disabled:opacity-40">تحديد كل غير المطابق</button>
+          {stageATransferResults.length > 0 && <button onClick={() => { onTransferToB(stageATransferResults, databaseSummary); clearAllStageASelection(); }} className="rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-700">{selectedResultIds.size ? "ترحيل المحدد" : "ترحيل المطابق"} ({stageATransferResults.length}) إلى B ←</button>}
+          {selectedResultIds.size > 0 && <button onClick={() => { onTransferVisaToC(results.filter(result => selectedResultIds.has(resultKey(result)))); clearAllStageASelection(); }} className="rounded-lg bg-amber-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-amber-700">ترحيل المحدد ({selectedResultIds.size}) إلى C ←</button>}
+          {selectedResultIds.size > 0 && <button onClick={clearAllStageASelection} className="rounded-lg border px-3 py-1.5 text-xs">إلغاء التحديد</button>}
+          {results.some(result => result.category === "فيزا") && <button onClick={() => onTransferVisaToC(results.filter(result => result.category === "فيزا"))} className="rounded-lg bg-amber-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-amber-700">ترحيل كل الفيزا إلى C ←</button>}
+        </div>
+      </div>
+      <div className="overflow-x-auto"><table className="w-full text-sm"><thead className="bg-slate-100 text-xs"><tr><th className="p-3 text-right"><input aria-label="تحديد كل النتائج الظاهرة" type="checkbox" checked={visibleActionResults.length > 0 && visibleActionResults.every(result => selectedResultIds.has(resultKey(result)))} onChange={event => setSelectedResultIds(previous => { const next = new Set(previous); visibleActionResults.forEach(result => event.target.checked ? next.add(resultKey(result)) : next.delete(resultKey(result))); return next; })} /></th>{["المنصة", "التصنيف", "بيان الفاتورة", "اسم الزبون من قاعدة البيانات", "النوع", "مبلغ التطبيق", "إجمالي الفاتورة", "نقدي", "شيك", "دين", "الخصم", "رقم المستخدم", "تاريخ الفاتورة", "الساعة", "رقم الفاتورة", "الحالة", "ملاحظة"].map(column => <th key={column} className="p-3 text-right">{column}</th>)}</tr></thead>
+        <tbody>{visibleActionResults.map(result => <tr key={`${result.source}-${result.id}`} className={`border-t ${result.matched ? "bg-green-50/30" : "bg-red-50/30"}`}>
+          <td className="p-3"><input aria-label={`تحديد فاتورة ${result.originalName}`} type="checkbox" checked={selectedResultIds.has(resultKey(result))} onChange={() => toggleResultSelection(result)} /></td><td className="p-3">{result.source}</td><td className="p-3 font-semibold">{result.category}</td><td className="p-3 font-medium">{result.originalName}</td><td className="p-3">{result.databaseName || "—"}</td>
+            <td className="p-3">{result.type}</td><td className="p-3 font-mono">{fmtNum(result.amount)}</td><td className="p-3 font-mono">{fmtNum(result.invoiceTotal)}</td><td className="p-3 font-mono">{fmtNum(result.cashAmount)}</td><td className="p-3 font-mono">{fmtNum(result.checkAmount)}</td><td className="p-3 font-mono">{fmtNum(result.debtAmount)}</td><td className="p-3 font-mono font-semibold text-amber-700">{fmtNum(result.discountAmount)}</td>
+          <td className="p-3">{result.userId || "—"}</td><td className="p-3">{result.invoiceDate || "—"}</td><td className="p-3">{result.registrationTime || "—"}</td><td className="p-3">{result.invoiceNumber || "—"}</td>
+          <td className={`p-3 font-semibold ${result.matched ? "text-green-700" : "text-red-700"}`}>{result.matched ? "مطابق" : "غير مطابق"}</td><td className="p-3 text-xs text-orange-700">{result.categoryIssue || result.issue || "—"}</td>
+        </tr>)}</tbody></table></div>
+    </div>}
+    {showDatabaseInvoices && <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 p-3" role="dialog" aria-modal="true" aria-label="تفاصيل فواتير قاعدة البيانات">
+        <section className="flex max-h-[92vh] w-full max-w-7xl flex-col overflow-hidden rounded-2xl bg-white shadow-2xl">
+          <header className="flex items-center justify-between gap-3 border-b p-4">
+            <div><h2 className="text-lg font-black">فواتير قاعدة البيانات</h2><p className="mt-1 text-xs text-slate-500">{databaseInvoiceRows.length} فاتورة · الإجمالي {fmtNum(databaseSummary.databaseInvoiceTotal)} ₪ · الخصم {fmtNum(databaseSummary.databaseDiscountTotal ?? 0)} ₪</p></div>
+            <button type="button" onClick={() => setShowDatabaseInvoices(false)} aria-label="إغلاق التفاصيل" className="rounded-lg p-2 hover:bg-slate-100"><X className="h-5 w-5" /></button>
+          </header>
+          <div className="grid gap-2 border-b bg-slate-50 p-3 sm:grid-cols-3 lg:grid-cols-6">
+            {[["الإجمالي", databaseSummary.databaseInvoiceTotal], ["النقدي", databaseSummary.databaseCashTotal], ["الشيك", databaseInvoiceRows.reduce((sum, invoice) => sum + invoice.checkAmount, 0)], ["الكارد / التطبيقات", databaseSummary.databaseCardTotal], ["المتبقي", databaseSummary.databaseDebtTotal], ["الخصم", databaseSummary.databaseDiscountTotal ?? 0]].map(([label, value]) => <div key={String(label)} className="rounded-lg border bg-white p-2"><div className="text-[10px] text-slate-500">{label}</div><div className="font-mono text-xs font-bold">{fmtNum(Number(value))} ₪</div></div>)}
+          </div>
+          <div className="min-h-0 flex-1 overflow-auto">
+            <table className="w-full min-w-[1100px] text-xs">
+              <thead className="sticky top-0 bg-slate-100"><tr>{["رقم الفاتورة", "التاريخ", "الوقت", "اسم الزبون", "رقم الزبون", "رقم المستخدم", "الإجمالي", "نقدي", "شيك", "مدفوع بالكارد / تطبيق", "المتبقي", "الخصم"].map(label => <th key={label} className="p-2 text-right">{label}</th>)}</tr></thead>
+              <tbody>{visibleDatabaseInvoices.map((invoice, index) => <tr key={`${invoice.invoiceNumber}-${index}`} className="border-t">
+                <td className="p-2 font-mono">{invoice.invoiceNumber || "—"}</td><td className="p-2">{invoice.invoiceDate || "—"}</td><td className="p-2">{invoice.registrationTime || "—"}</td><td className="p-2">{invoice.name || "—"}</td><td className="p-2">{invoice.customerNumber || "—"}</td><td className="p-2">{invoice.userId || "—"}</td>
+                <td className="p-2 font-mono">{fmtNum(invoice.invoiceTotal)}</td><td className="p-2 font-mono">{fmtNum(invoice.cashAmount)}</td><td className="p-2 font-mono">{fmtNum(invoice.checkAmount)}</td><td className="p-2 font-mono">{fmtNum(invoice.cardAmount)}</td><td className="p-2 font-mono">{fmtNum(invoice.debtAmount)}</td><td className={`p-2 font-mono ${invoice.discountAmount > 0 ? "font-bold text-amber-700" : ""}`}>{fmtNum(invoice.discountAmount)}</td>
+              </tr>)}</tbody>
+            </table>
+          </div>
+          <footer className="flex items-center justify-center gap-3 border-t p-3 text-xs"><button type="button" onClick={() => setDatabaseInvoicePage(page => Math.max(1, page - 1))} disabled={databaseInvoicePage <= 1} className="rounded border px-3 py-1.5 disabled:opacity-40">السابق</button><span>صفحة {Math.min(databaseInvoicePage, databaseInvoicePageCount)} من {databaseInvoicePageCount}</span><button type="button" onClick={() => setDatabaseInvoicePage(page => Math.min(databaseInvoicePageCount, page + 1))} disabled={databaseInvoicePage >= databaseInvoicePageCount} className="rounded border px-3 py-1.5 disabled:opacity-40">التالي</button></footer>
+        </section>
+    </div>}
   </div></div>;
 }
 
@@ -584,6 +1103,7 @@ interface StageBInvoice {
   date: string;
   source: string;
   raw: Record<string, unknown>;
+  stageAInvoice?: StageAResult;
 }
 
 interface StageBTransfer {
@@ -593,9 +1113,17 @@ interface StageBTransfer {
   amount: number;
   receivedAmount: number;
   accountType: string;
-  type: "بنك فلسطين" | "محفظة تجارية";
+  type: string;
   date: string;
   raw: Record<string, unknown>;
+}
+
+interface StageBExtraTransferFile {
+  fileName: string;
+  headers: string[];
+  rows: Record<string, unknown>[];
+  map: { name: string; amount: string; paidAmount: string; receivedAmount: string; accountType: string; userId: string; date: string };
+  swap: boolean;
 }
 
 interface StageBMatch {
@@ -636,19 +1164,24 @@ function stageBNameMatch(invoiceName: string, transferName: string, aliases: Rec
 }
 
 function stageBAccountType(invoice: StageBInvoice): string {
-  return invoice.accountType || (invoice.source.includes("بنك") ? "بنك فلسطين" : invoice.source.includes("محفظة") ? "محفظة تجارية" : "");
+  const value = invoice.accountType || invoice.source;
+  if (/بنك\s*فلسطين|bank\s*of\s*palestine/i.test(value)) return "بنك فلسطين";
+  if (/محفظة\s*تجارية|بال\s*بي|pal\s*pay|palpay|wallet/i.test(value)) return "بال بي";
+  if (/جوال\s*بي|jawwal/i.test(value)) return "جوال بي";
+  return value.trim();
 }
 
 function stageBTransferAccountType(transfer: StageBTransfer): string {
   return transfer.accountType || transfer.type;
 }
 
-function StageBPlatform({ invoices, onBack, onTransferVisaToC, onSafeActivities }: { invoices: StageAResult[]; onBack: () => void; onTransferVisaToC: (results: StageAResult[]) => void; onSafeActivities?: (activities: string[]) => void }) {
+function StageBPlatform({ invoices, onBack, onTransferVisaToC, onSafeActivities, onOpenInvoiceReference }: { invoices: StageAResult[]; onBack: () => void; onTransferVisaToC: (results: StageAResult[]) => void; onSafeActivities?: (activities: string[]) => void; onOpenInvoiceReference?: (invoice: StageAResult) => boolean }) {
   const emptyMap = useMemo(() => ({ name: "", amount: "", paidAmount: "", receivedAmount: "", accountType: "", userId: "", date: "" }), []);
-  const [files, setFiles] = useState<Record<string, File | null>>({ invoiceBank: null, transferBank: null, invoiceWallet: null, transferWallet: null });
-  const [headers, setHeaders] = useState<Record<string, string[]>>({ invoiceBank: [], transferBank: [], invoiceWallet: [], transferWallet: [] });
-  const [rows, setRows] = useState<Record<string, Record<string, unknown>[]>>({ invoiceBank: [], transferBank: [], invoiceWallet: [], transferWallet: [] });
-  const [maps, setMaps] = useState<Record<string, typeof emptyMap>>({ invoiceBank: emptyMap, transferBank: emptyMap, invoiceWallet: emptyMap, transferWallet: emptyMap });
+  const [files, setFiles] = useState<Record<string, File | null>>({ invoiceBank: null, transferBank: null, invoiceWallet: null, transferWallet: null, transferJawwal: null });
+  const [headers, setHeaders] = useState<Record<string, string[]>>({ invoiceBank: [], transferBank: [], invoiceWallet: [], transferWallet: [], transferJawwal: [] });
+  const [rows, setRows] = useState<Record<string, Record<string, unknown>[]>>({ invoiceBank: [], transferBank: [], invoiceWallet: [], transferWallet: [], transferJawwal: [] });
+  const [maps, setMaps] = useState<Record<string, typeof emptyMap>>({ invoiceBank: emptyMap, transferBank: emptyMap, invoiceWallet: emptyMap, transferWallet: emptyMap, transferJawwal: emptyMap });
+  const [extraTransfers, setExtraTransfers] = useState<Record<string, StageBExtraTransferFile>>({});
   const [matches, setMatches] = useState<StageBMatch[]>([]);
   const [aliases, setAliases] = useState<Record<string, string>>({});
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -662,17 +1195,21 @@ function StageBPlatform({ invoices, onBack, onTransferVisaToC, onSafeActivities 
   const [drawerMode, setDrawerMode] = useState<"invoice" | "transfer">("transfer");
   const [stageBView, setStageBView] = useState<"pending" | "confirmed" | "manual">("pending");
   const rowRefs = useRef<Record<string, HTMLTableRowElement | null>>({});
+  const stageBCheckboxRefs = useRef<Record<string, HTMLInputElement | null>>({});
+  const [activeStageBMatchId, setActiveStageBMatchId] = useState<string | null>(null);
   const [detailMatchId, setDetailMatchId] = useState<string | null>(null);
+  const [detailMode, setDetailMode] = useState<"invoice" | "transfer">("invoice");
   const undoStack = useRef<StageBMatch[][]>([]);
   const [error, setError] = useState<string | null>(null);
   const [stageBPage, setStageBPage] = useState(1);
   const [showSettings, setShowSettings] = useState(false);
   const [amountTolerancePercent, setAmountTolerancePercent] = useState(0.5);
+  const [removeRepeatedInvoiceHeaders, setRemoveRepeatedInvoiceHeaders] = useState(true);
   const [stageBAccountFilter, setStageBAccountFilter] = useState("all");
   type StageBSort = "none" | "name" | "amountAsc" | "amountDesc";
   const [invoiceSort, setInvoiceSort] = useState<StageBSort>("none");
   const [transferSort, setTransferSort] = useState<StageBSort>("none");
-  const [stageBSwaps, setStageBSwaps] = useState<Record<string, boolean>>({ invoiceBank: false, transferBank: false, invoiceWallet: false, transferWallet: false });
+  const [stageBSwaps, setStageBSwaps] = useState<Record<string, boolean>>({ invoiceBank: true, transferBank: false, invoiceWallet: true, transferWallet: false, transferJawwal: true });
   const sessionFileRef = useRef<HTMLInputElement>(null);
   const hasTransferredInvoices = invoices.some(invoice => invoice.category !== "فيزا");
 
@@ -680,71 +1217,143 @@ function StageBPlatform({ invoices, onBack, onTransferVisaToC, onSafeActivities 
     storageGet<Record<string, string>>("stage_b_aliases", {}).then(setAliases);
     storageGet<any>("stage_b_session", null).then(session => {
       if (!session) return;
-      setHeaders(session.headers || { invoiceBank: [], transferBank: [], invoiceWallet: [], transferWallet: [] });
-      setRows(session.rows || { invoiceBank: [], transferBank: [], invoiceWallet: [], transferWallet: [] });
-      setMaps(session.maps || { invoiceBank: emptyMap, transferBank: emptyMap, invoiceWallet: emptyMap, transferWallet: emptyMap });
+      setHeaders({ invoiceBank: [], transferBank: [], invoiceWallet: [], transferWallet: [], transferJawwal: [], ...(session.headers ?? {}) });
+      setRows({ invoiceBank: [], transferBank: [], invoiceWallet: [], transferWallet: [], transferJawwal: [], ...(session.rows ?? {}) });
+      const restoredMaps = { invoiceBank: emptyMap, transferBank: emptyMap, invoiceWallet: emptyMap, transferWallet: emptyMap, transferJawwal: emptyMap, ...(session.maps ?? {}) };
+      (["invoiceBank", "invoiceWallet"] as const).forEach(source => {
+        const fileHeaders = session.headers?.[source] ?? [];
+        if (session.stageBSwaps?.[source] === true || !fileHeaders.length) return;
+        const detected = detectInvoiceFileColumns(fileHeaders);
+        restoredMaps[source] = { ...restoredMaps[source], ...detected };
+      });
+      setMaps(restoredMaps);
+      setExtraTransfers(session.extraTransfers ?? {});
+      const restoredSwaps = { invoiceBank: true, transferBank: false, invoiceWallet: true, transferWallet: false, transferJawwal: true, ...(session.stageBSwaps ?? {}) };
+      restoredSwaps.invoiceBank = session.stageBSwaps?.invoiceBank ?? true;
+      restoredSwaps.invoiceWallet = session.stageBSwaps?.invoiceWallet ?? true;
+      setStageBSwaps(restoredSwaps);
       setMatches(session.matches || []);
       setAmountTolerancePercent(session.amountTolerancePercent ?? 0.5);
     });
   }, [emptyMap]);
 
   const parseAmount = (value: unknown) => Number.parseFloat(String(value ?? "").replace(/[٫٬]/g, match => match === "٫" ? "." : "").replace(/,/g, "")) || 0;
-  const loadFile = async (source: "invoiceBank" | "transferBank" | "invoiceWallet" | "transferWallet", file: File) => {
+  const loadFile = async (source: "invoiceBank" | "transferBank" | "invoiceWallet" | "transferWallet" | "transferJawwal", file: File) => {
     try {
       const parsed = parseSheet(await readFileBuf(file));
       setFiles(prev => ({ ...prev, [source]: file }));
       setHeaders(prev => ({ ...prev, [source]: parsed.headers }));
       setRows(prev => ({ ...prev, [source]: parsed.rows }));
+      const isInvoiceFile = source === "invoiceBank" || source === "invoiceWallet";
       setMaps(prev => ({ ...prev, [source]: {
-        name: autoDetect(parsed.headers, HINTS.name),
+        name: autoDetect(parsed.headers, ["البيان", "بيان", "إسم الزبون", "اسم الزبون", "اسم العميل", "اسم", "name", "customer", "client"]),
         amount: detectCardPaidColumn(parsed.headers) || autoDetect(parsed.headers, HINTS.debit) || autoDetect(parsed.headers, ["amount", "مبلغ"]),
-        paidAmount: detectCardPaidColumn(parsed.headers) || autoDetect(parsed.headers, ["paid", "مدفوع", "المبلغ المدفوع"]) || autoDetect(parsed.headers, HINTS.debit),
-        receivedAmount: autoDetect(parsed.headers, ["received", "مستلم", "المبلغ المستلم"]) || autoDetect(parsed.headers, HINTS.credit),
+        paidAmount: isInvoiceFile
+          ? detectCardPaidColumn(parsed.headers) || autoDetect(parsed.headers, ["paid", "مدفوع", "المبلغ المدفوع"]) || autoDetect(parsed.headers, HINTS.credit)
+          : detectCardPaidColumn(parsed.headers) || autoDetect(parsed.headers, ["paid", "مدفوع", "المبلغ المدفوع"]) || autoDetect(parsed.headers, HINTS.debit),
+        receivedAmount: isInvoiceFile
+          ? autoDetect(parsed.headers, ["received", "مستلم", "المبلغ المستلم"]) || autoDetect(parsed.headers, HINTS.debit)
+          : autoDetect(parsed.headers, ["received", "مستلم", "المبلغ المستلم"]) || autoDetect(parsed.headers, HINTS.credit),
         accountType: autoDetect(parsed.headers, HINTS.accountType),
         userId: "",
         date: autoDetect(parsed.headers, HINTS.date)
       } }));
+      if (isInvoiceFile) setStageBSwaps(prev => ({ ...prev, [source]: true }));
+      if (source === "transferJawwal") setStageBSwaps(prev => ({ ...prev, [source]: true }));
       setError(null);
     } catch (e) { setError((e as Error).message); }
+  };
+  const processInvoiceFileHeaders = (source: "invoiceBank" | "invoiceWallet") => {
+    if (!removeRepeatedInvoiceHeaders) return;
+    const fileHeaders = headers[source] ?? [];
+    const sourceRows = rows[source] ?? [];
+    const headerKeys = fileHeaders.map(header => normName(header));
+    const cleanedRows = sourceRows.filter(row => !fileHeaders.every((header, index) =>
+      normName(String(row[header] ?? "")) === headerKeys[index]
+    ));
+    setRows(previous => ({ ...previous, [source]: cleanedRows }));
+    setError(cleanedRows.length === sourceRows.length
+      ? "لم يتم العثور على ترويسات مكررة لإزالتها."
+      : `تمت إزالة ${sourceRows.length - cleanedRows.length} صفوف ترويسة مكررة من ${files[source]?.name ?? "ملف الفواتير"}.`);
   };
 
   const invoiceData = useMemo<StageBInvoice[]>(() => {
     const sources = (["invoiceBank", "invoiceWallet"] as const).flatMap(source => {
       const swap = stageBSwaps[source];
-      return rows[source].map((row, index) => ({
+      return (rows[source] ?? []).map((row, index) => ({
         id: `${source}-${index}`, name: String(row[maps[source].name] ?? "").trim(),
         originalName: String(row[maps[source].name] ?? "").trim(), amount: parseAmount(swap ? (row[maps[source].receivedAmount] || row[maps[source].amount]) : (row[maps[source].paidAmount] || row[maps[source].amount])),
         paidAmount: parseAmount(swap ? (row[maps[source].receivedAmount] || row[maps[source].amount]) : (row[maps[source].paidAmount] || row[maps[source].amount])),
-        accountType: source === "invoiceBank" ? "بنك فلسطين" : "محفظة تجارية", userId: "",
+        accountType: source === "invoiceBank" ? "بنك فلسطين" : "بال بي", userId: "",
         registrationTime: "", customerNumber: "", invoiceNumber: "",
-        date: String(row[maps[source].date] ?? "").trim(), source: source === "invoiceBank" ? "فاتورة بنك فلسطين" : "فاتورة محفظة تجارية", raw: row
+        date: String(row[maps[source].date] ?? "").trim(), source: source === "invoiceBank" ? "فاتورة بنك فلسطين" : "فاتورة بال بي", raw: row
       })).filter(row => row.name || row.amount);
     });
     if (sources.length) return sources;
     return invoices.filter(invoice => invoice.category !== "فيزا").map((invoice, index) => ({
       id: `stage-a-${invoice.id}-${index}`, name: invoice.name, originalName: invoice.originalName,
-      amount: invoice.amount, accountType: invoice.accountType, userId: invoice.userId,
+      amount: invoice.amount, accountType: invoice.category || invoice.source, userId: invoice.userId,
       paidAmount: invoice.amount,
       registrationTime: invoice.registrationTime, customerNumber: invoice.customerNumber, invoiceNumber: invoice.invoiceNumber,
-      date: "", source: invoice.category, raw: invoice.invoice
+      date: invoice.invoiceDate, source: invoice.category, raw: invoice.invoice, stageAInvoice: invoice
     }));
   }, [rows, maps, invoices, stageBSwaps]);
 
-  const transferData = useMemo<StageBTransfer[]>(() => (["transferBank", "transferWallet"] as const).flatMap(source => {
+  const allTransferPlatforms = useMemo(() => [...new Set(invoiceData.map(stageBAccountType).filter(Boolean))], [invoiceData]);
+  const transferPlatforms = useMemo(() => allTransferPlatforms.filter(type => !["بنك فلسطين", "بال بي", "جوال بي"].includes(type)), [allTransferPlatforms]);
+  const loadExtraTransfer = async (platform: string, file: File) => {
+    try {
+      const parsed = parseSheet(await readFileBuf(file));
+      setExtraTransfers(previous => ({
+        ...previous,
+        [platform]: {
+          fileName: file.name,
+          headers: parsed.headers,
+          rows: parsed.rows,
+          map: {
+            name: autoDetect(parsed.headers, ["بيان الحوالة", "اسم الزبون", "اسم العميل", "description", "name", "customer"]),
+            amount: detectCardPaidColumn(parsed.headers) || autoDetect(parsed.headers, HINTS.debit) || autoDetect(parsed.headers, ["amount", "مبلغ"]),
+            paidAmount: autoDetect(parsed.headers, ["مدفوع", "debit", "paid"]) || autoDetect(parsed.headers, HINTS.debit),
+            receivedAmount: autoDetect(parsed.headers, ["مستلم", "credit", "received"]) || autoDetect(parsed.headers, HINTS.credit),
+            accountType: "", userId: "", date: autoDetect(parsed.headers, HINTS.date),
+          },
+          swap: false,
+        },
+      }));
+      setError(null);
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  };
+
+  const transferData = useMemo<StageBTransfer[]>(() => (["transferBank", "transferWallet", "transferJawwal"] as const).flatMap(source => {
     const swap = stageBSwaps[source];
-    return rows[source].map((row, index) => ({
+    const accountType = source === "transferBank" ? "بنك فلسطين" : source === "transferWallet" ? "بال بي" : "جوال بي";
+    return (rows[source] ?? []).map((row, index) => ({
       id: `${source}-${index}`, name: String(row[maps[source].name] ?? "").trim(),
       description: String(row[maps[source].name] ?? "").trim(), amount: parseAmount(swap ? (row[maps[source].paidAmount] || row[maps[source].amount]) : (row[maps[source].receivedAmount] || row[maps[source].amount])),
       receivedAmount: parseAmount(swap ? (row[maps[source].paidAmount] || row[maps[source].amount]) : (row[maps[source].receivedAmount] || row[maps[source].amount])),
-      accountType: source === "transferBank" ? "بنك فلسطين" : "محفظة تجارية",
-      type: (source === "transferBank" ? "بنك فلسطين" : "محفظة تجارية") as StageBTransfer["type"],
+      accountType, type: accountType,
       date: String(row[maps[source].date] ?? "").trim(), raw: row
     })).filter(row => row.name || row.amount);
-  }), [rows, maps, stageBSwaps]);
+  }).concat(Object.entries(extraTransfers).flatMap(([platform, fileData]) => {
+    const swap = fileData.swap;
+    const extraRows: StageBTransfer[] = fileData.rows.map((row, index) => {
+      const receivedAmount = parseAmount(swap ? row[fileData.map.paidAmount] || row[fileData.map.amount] : row[fileData.map.receivedAmount] || row[fileData.map.amount]);
+      return {
+        id: `extra-${platform}-${index}`,
+        name: String(row[fileData.map.name] ?? "").trim(),
+        description: String(row[fileData.map.name] ?? "").trim(),
+        amount: receivedAmount, receivedAmount, accountType: platform, type: platform,
+        date: String(row[fileData.map.date] ?? "").trim(), raw: row,
+      };
+    }).filter(row => row.name || row.amount);
+    return extraRows;
+  })), [rows, maps, stageBSwaps, extraTransfers]);
 
   const runStageB = () => {
-    if (!invoiceData.length) { setError(invoices.length ? "لا توجد فواتير مرحلة من قاعدة البيانات." : "ارفع ملفي فواتير بنك فلسطين والمحفظة التجارية."); return; }
-    if (!transferData.length) { setError("ارفع حوالات بنك فلسطين وحوالات المحفظة التجارية."); return; }
+    if (!invoiceData.length) { setError(invoices.length ? "لا توجد فواتير مرحلة من قاعدة البيانات." : "ارفع ملفات الفواتير أولاً."); return; }
+    if (!transferData.length) { setError(`ارفع ملفات الحوالات المطلوبة: ${allTransferPlatforms.join("، ") || "المنصات المرحّلة"}.`); return; }
     const used = new Set<string>();
     const output = invoiceData.map(invoice => {
       const candidates = transferData
@@ -779,21 +1388,6 @@ function StageBPlatform({ invoices, onBack, onTransferVisaToC, onSafeActivities 
     undoStack.current.push(prev);
     return prev.map(match => ids.has(match.id) ? { ...match, status } : match);
   });
-  useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        setDrawerMatchId(null);
-        setDetailMatchId(null);
-      }
-      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "z") {
-        event.preventDefault();
-        const previous = undoStack.current.pop();
-        if (previous) setMatches(previous);
-      }
-    };
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, []);
   const replaceTransfer = (match: StageBMatch, transfer: StageBTransfer) => {
     setMatches(prev => {
       undoStack.current.push(prev);
@@ -871,11 +1465,86 @@ function StageBPlatform({ invoices, onBack, onTransferVisaToC, onSafeActivities 
     return next;
   });
   const toggleAll = togglePage;
+  const openDetails = (matchId: string, mode: "invoice" | "transfer") => {
+    setDetailMode(mode);
+    setDetailMatchId(matchId);
+  };
   const openReplacement = (matchId: string, mode: "invoice" | "transfer") => {
     setDrawerMode(mode);
     setDrawerMatchId(matchId);
     window.setTimeout(() => rowRefs.current[matchId]?.scrollIntoView({ behavior: "smooth", block: "center", inline: "nearest" }), 0);
   };
+  useEffect(() => {
+    const onFocusIn = (event: FocusEvent) => {
+      const target = event.target;
+      if (!(target instanceof HTMLElement) || !target.closest(".stage-b-results")) return;
+      const entry = Object.entries(rowRefs.current).find(([, row]) => row?.contains(target));
+      if (entry) setActiveStageBMatchId(entry[0]);
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      const target = event.target;
+      const isTextEntry = target instanceof HTMLElement && (
+        target.isContentEditable ||
+        target.matches("input:not([type='checkbox']), textarea, select")
+      );
+      if (event.key === "Escape") {
+        setDrawerMatchId(null);
+        setDetailMatchId(null);
+        return;
+      }
+      if ((event.ctrlKey || event.metaKey) && event.code === "KeyZ") {
+        if (isTextEntry) return;
+        event.preventDefault();
+        const previous = undoStack.current.pop();
+        if (previous) setMatches(previous);
+        return;
+      }
+      if (isTextEntry || event.ctrlKey || event.metaKey || event.altKey) return;
+
+      const focusedCheckbox = target instanceof HTMLInputElement && target.type === "checkbox" ? target : null;
+      if (focusedCheckbox?.closest(".stage-b-results") && (event.code === "ArrowDown" || event.code === "ArrowUp" || event.code === "Tab")) {
+        const focusedId = pagedMatches.find(match => rowRefs.current[match.id]?.contains(focusedCheckbox))?.id;
+        const currentIndex = pagedMatches.findIndex(match => match.id === (focusedId || activeStageBMatchId));
+        const direction = event.code === "ArrowUp" || (event.code === "Tab" && event.shiftKey) ? -1 : 1;
+        const nextIndex = currentIndex + direction;
+        if (nextIndex >= 0 && nextIndex < pagedMatches.length) {
+          event.preventDefault();
+          const nextMatch = pagedMatches[nextIndex];
+          setActiveStageBMatchId(nextMatch.id);
+          stageBCheckboxRefs.current[nextMatch.id]?.focus();
+        }
+        return;
+      }
+
+      const currentId = activeStageBMatchId && pagedMatches.some(match => match.id === activeStageBMatchId)
+        ? activeStageBMatchId
+        : [...selected].find(id => pagedMatches.some(match => match.id === id));
+      if (!currentId) return;
+      const key = event.code;
+      if (key === "KeyR" || key === "KeyT") {
+        event.preventDefault();
+        const match = matches.find(item => item.id === currentId);
+        const openedReference = key === "KeyR" && match?.invoice.stageAInvoice
+          ? onOpenInvoiceReference?.(match.invoice.stageAInvoice)
+          : false;
+        if (!openedReference) {
+          openDetails(currentId, key === "KeyR" ? "invoice" : "transfer");
+        }
+      } else if (key === "KeyF" || key === "KeyH") {
+        event.preventDefault();
+        openReplacement(currentId, key === "KeyF" ? "invoice" : "transfer");
+      } else if (key === "KeyX") {
+        event.preventDefault();
+        updateStatus(new Set([currentId]), "rejected");
+      }
+    };
+    window.addEventListener("focusin", onFocusIn);
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.removeEventListener("focusin", onFocusIn);
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [activeStageBMatchId, matches, onOpenInvoiceReference, pagedMatches, selected]);
   const suggestionClass = (amountDiff: number, nameMatch: number) =>
     amountDiff <= 0.01 && nameMatch >= 0.5
       ? "border-green-300 bg-green-50 text-green-800"
@@ -903,12 +1572,12 @@ function StageBPlatform({ invoices, onBack, onTransferVisaToC, onSafeActivities 
   };
 
   const saveStageBSession = () => {
-    void storageSet("stage_b_session", { headers, rows, maps, matches, amountTolerancePercent });
+    void storageSet("stage_b_session", { headers, rows, maps, matches, amountTolerancePercent, extraTransfers, stageBSwaps });
     setError(null);
   };
 
   const exportStageBSession = () => {
-    const blob = new Blob([JSON.stringify({ headers, rows, maps, matches, amountTolerancePercent })], { type: "application/json" });
+    const blob = new Blob([JSON.stringify({ headers, rows, maps, matches, amountTolerancePercent, extraTransfers, stageBSwaps })], { type: "application/json" });
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = url;
@@ -919,10 +1588,12 @@ function StageBPlatform({ invoices, onBack, onTransferVisaToC, onSafeActivities 
 
   const clearStageBSession = () => {
     if (!window.confirm("مسح ملفات ونتائج المرحلة B الحالية؟")) return;
-    setFiles({ invoiceBank: null, transferBank: null, invoiceWallet: null, transferWallet: null });
-    setHeaders({ invoiceBank: [], transferBank: [], invoiceWallet: [], transferWallet: [] });
-    setRows({ invoiceBank: [], transferBank: [], invoiceWallet: [], transferWallet: [] });
-    setMaps({ invoiceBank: emptyMap, transferBank: emptyMap, invoiceWallet: emptyMap, transferWallet: emptyMap });
+    setFiles({ invoiceBank: null, transferBank: null, invoiceWallet: null, transferWallet: null, transferJawwal: null });
+    setHeaders({ invoiceBank: [], transferBank: [], invoiceWallet: [], transferWallet: [], transferJawwal: [] });
+    setRows({ invoiceBank: [], transferBank: [], invoiceWallet: [], transferWallet: [], transferJawwal: [] });
+    setMaps({ invoiceBank: emptyMap, transferBank: emptyMap, invoiceWallet: emptyMap, transferWallet: emptyMap, transferJawwal: emptyMap });
+    setExtraTransfers({});
+    setStageBSwaps({ invoiceBank: true, transferBank: false, invoiceWallet: true, transferWallet: false, transferJawwal: true });
     setMatches([]);
     setSelected(new Set());
     void storageSet("stage_b_session", null);
@@ -932,9 +1603,21 @@ function StageBPlatform({ invoices, onBack, onTransferVisaToC, onSafeActivities 
     try {
       const session = JSON.parse(new TextDecoder().decode(await readFileBuf(file)));
       if (!session || typeof session !== "object" || !session.rows || !session.maps) throw new Error("ملف المرحلة B غير صالح.");
-      setHeaders(session.headers || { invoiceBank: [], transferBank: [], invoiceWallet: [], transferWallet: [] });
-      setRows(session.rows);
-      setMaps(session.maps);
+      setHeaders({ invoiceBank: [], transferBank: [], invoiceWallet: [], transferWallet: [], transferJawwal: [], ...(session.headers ?? {}) });
+      setRows({ invoiceBank: [], transferBank: [], invoiceWallet: [], transferWallet: [], transferJawwal: [], ...(session.rows ?? {}) });
+      const restoredMaps = { invoiceBank: emptyMap, transferBank: emptyMap, invoiceWallet: emptyMap, transferWallet: emptyMap, transferJawwal: emptyMap, ...(session.maps ?? {}) };
+      (["invoiceBank", "invoiceWallet"] as const).forEach(source => {
+        const fileHeaders = session.headers?.[source] ?? [];
+        if (session.stageBSwaps?.[source] === true || !fileHeaders.length) return;
+        const detected = detectInvoiceFileColumns(fileHeaders);
+        restoredMaps[source] = { ...restoredMaps[source], ...detected };
+      });
+      setMaps(restoredMaps);
+      setExtraTransfers(session.extraTransfers ?? {});
+      const restoredSwaps = { invoiceBank: true, transferBank: false, invoiceWallet: true, transferWallet: false, transferJawwal: true, ...(session.stageBSwaps ?? {}) };
+      restoredSwaps.invoiceBank = session.stageBSwaps?.invoiceBank ?? true;
+      restoredSwaps.invoiceWallet = session.stageBSwaps?.invoiceWallet ?? true;
+      setStageBSwaps(restoredSwaps);
       setMatches(session.matches || []);
       setAmountTolerancePercent(session.amountTolerancePercent ?? 0.5);
       setError(null);
@@ -955,24 +1638,54 @@ function StageBPlatform({ invoices, onBack, onTransferVisaToC, onSafeActivities 
     { label: "إجمالي المطابقات", value: matches.length, color: "border-slate-200 bg-white text-slate-700" },
   ];
 
-  const renderFile = (source: "invoiceBank" | "transferBank" | "invoiceWallet" | "transferWallet", label: string) => (
+  const renderFile = (source: "invoiceBank" | "transferBank" | "invoiceWallet" | "transferWallet" | "transferJawwal", label: string) => (
     <div className="space-y-3 rounded-xl border border-slate-200 bg-white p-4">
       <h2 className="text-sm font-bold">{label}</h2>
       <DropZone file={files[source]} onFile={file => loadFile(source, file)} onClear={() => { setFiles(prev => ({ ...prev, [source]: null })); setHeaders(prev => ({ ...prev, [source]: [] })); setRows(prev => ({ ...prev, [source]: [] })); }} />
       {!!headers[source].length && <>
+        {(source === "invoiceBank" || source === "invoiceWallet") && <div className="flex flex-wrap items-center gap-3">
+          <label className="flex items-center gap-2 text-xs text-slate-600"><input type="checkbox" checked={removeRepeatedInvoiceHeaders} onChange={event => setRemoveRepeatedInvoiceHeaders(event.target.checked)} />إزالة الترويسات المكررة</label>
+          <button type="button" onClick={() => processInvoiceFileHeaders(source)} className="rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-xs font-semibold text-blue-800 hover:bg-blue-100">معالجة الملف وإزالة الترويسات</button>
+        </div>}
         <div className="grid grid-cols-2 gap-2">
           <Sel label="الاسم / البيان" headers={headers[source]} value={maps[source].name} onChange={value => setMaps(prev => ({ ...prev, [source]: { ...prev[source], name: value } }))} />
-          <Sel label="المبلغ المدفوع" headers={headers[source]} value={maps[source].paidAmount} onChange={value => setMaps(prev => ({ ...prev, [source]: { ...prev[source], paidAmount: value, amount: value } }))} />
-          <Sel label="المبلغ المستلم" headers={headers[source]} value={maps[source].receivedAmount} onChange={value => setMaps(prev => ({ ...prev, [source]: { ...prev[source], receivedAmount: value } }))} />
+          <Sel label={source === "invoiceBank" || source === "invoiceWallet" ? "المبلغ المدفوع (Credit)" : "المبلغ المدفوع"} headers={headers[source]} value={maps[source].paidAmount} onChange={value => setMaps(prev => ({ ...prev, [source]: { ...prev[source], paidAmount: value, amount: value } }))} />
+          <Sel label={source === "invoiceBank" || source === "invoiceWallet" ? "المبلغ المستلم (Debit)" : "المبلغ المستلم"} headers={headers[source]} value={maps[source].receivedAmount} onChange={value => setMaps(prev => ({ ...prev, [source]: { ...prev[source], receivedAmount: value } }))} />
           <Sel label="نوع الحساب" headers={headers[source]} value={maps[source].accountType} onChange={value => setMaps(prev => ({ ...prev, [source]: { ...prev[source], accountType: value } }))} />
         </div>
         <label className="flex w-fit cursor-pointer items-center gap-2 text-xs text-slate-600">
           <input type="checkbox" checked={stageBSwaps[source]} onChange={event => setStageBSwaps(prev => ({ ...prev, [source]: event.target.checked }))} className="rounded" />
-          عكس المدين والدائن
+          {source === "invoiceBank" || source === "invoiceWallet"
+            ? stageBSwaps[source] ? "المستلم مدين والمدفوع دائن" : "المدفوع مدين والمستلم دائن"
+            : "عكس المدين والدائن"}
         </label>
       </>}
     </div>
   );
+  const renderExtraTransferFile = (platform: string) => {
+    const fileData = extraTransfers[platform];
+    return <div key={platform} className="space-y-3 rounded-xl border border-indigo-200 bg-white p-4">
+      <h2 className="text-sm font-bold">حوالات {platform}</h2>
+      <DropZone file={files[`transferExtra:${platform}`] ?? null} onFile={file => {
+        setFiles(previous => ({ ...previous, [`transferExtra:${platform}`]: file }));
+        void loadExtraTransfer(platform, file);
+      }} onClear={() => {
+        setFiles(previous => ({ ...previous, [`transferExtra:${platform}`]: null }));
+        setExtraTransfers(previous => { const next = { ...previous }; delete next[platform]; return next; });
+      }} />
+      {!files[`transferExtra:${platform}`] && fileData?.fileName && <p className="text-xs text-emerald-700">تم استعادة بيانات الملف: {fileData.fileName}</p>}
+      {!!fileData?.headers.length && <>
+        <div className="grid grid-cols-2 gap-2">
+          <Sel label="الاسم / البيان" headers={fileData.headers} value={fileData.map.name} onChange={value => setExtraTransfers(previous => ({ ...previous, [platform]: { ...fileData, map: { ...fileData.map, name: value } } }))} />
+          <Sel label="المبلغ" headers={fileData.headers} value={fileData.map.amount} onChange={value => setExtraTransfers(previous => ({ ...previous, [platform]: { ...fileData, map: { ...fileData.map, amount: value } } }))} />
+          <Sel label="المدفوع (Debit)" headers={fileData.headers} value={fileData.map.paidAmount} onChange={value => setExtraTransfers(previous => ({ ...previous, [platform]: { ...fileData, map: { ...fileData.map, paidAmount: value } } }))} />
+          <Sel label="المستلم (Credit)" headers={fileData.headers} value={fileData.map.receivedAmount} onChange={value => setExtraTransfers(previous => ({ ...previous, [platform]: { ...fileData, map: { ...fileData.map, receivedAmount: value } } }))} />
+          <Sel label="التاريخ" headers={fileData.headers} value={fileData.map.date} onChange={value => setExtraTransfers(previous => ({ ...previous, [platform]: { ...fileData, map: { ...fileData.map, date: value } } }))} />
+        </div>
+        <label className="flex w-fit cursor-pointer items-center gap-2 text-xs text-slate-600"><input type="checkbox" checked={fileData.swap} onChange={event => setExtraTransfers(previous => ({ ...previous, [platform]: { ...fileData, swap: event.target.checked } }))} />عكس المدين والدائن</label>
+      </>}
+    </div>;
+  };
 
   return <div dir="rtl" className="min-h-screen bg-slate-50 p-6 text-slate-900"><div className="mx-auto max-w-7xl space-y-5">
     <div className="sticky top-2 z-20 flex flex-wrap items-center justify-between gap-4 rounded-2xl border border-slate-200 bg-white/95 p-5">
@@ -997,14 +1710,14 @@ function StageBPlatform({ invoices, onBack, onTransferVisaToC, onSafeActivities 
         <input type="number" min="0" max="10" step="0.1" value={amountTolerancePercent} onChange={event => setAmountTolerancePercent(Math.min(10, Math.max(0, Number(event.target.value) || 0)))} className="w-20 rounded-lg border bg-white px-2 py-1.5 text-center" />%
       </label>
     </div>}
-    <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-sm leading-6 text-emerald-900">تتم المطابقة على أساس المبلغ والاسم معًا. عند الترحيل من A ارفع حوالتي بنك فلسطين والمحفظة التجارية فقط، وعند العمل المستقل ارفع ملفات الفواتير والحوالات الأربعة. نوع الحساب يُحدد تلقائياً من خانة الملف.</div>
+    <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-sm leading-6 text-emerald-900">تتم المطابقة على أساس المبلغ والاسم معًا. عند الترحيل من A تظهر خانة حوالات لكل منصة رُحّلت فواتيرها، بما فيها بنك فلسطين وبال بي وجوال بي والمنصات الإضافية. نوع الحساب يُحدد من المنصة التي رُحّلت منها الفاتورة.</div>
     {!!invoices.filter(invoice => invoice.category === "فيزا").length && <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
       <div><strong>فواتير الفيزا المرحّلة من قاعدة البيانات</strong><div className="mt-1 text-xs">تم الاحتفاظ بنتيجة الفرز، وهذه الفواتير تُرحّل إلى منصة C ولا تدخل في مطابقة B.</div></div>
       <button onClick={() => onTransferVisaToC(invoices.filter(invoice => invoice.category === "فيزا"))} className="rounded-lg bg-amber-600 px-4 py-2 text-xs font-medium text-white hover:bg-amber-700">ترحيل الفيزا إلى منصة C ({invoices.filter(invoice => invoice.category === "فيزا").length})</button>
     </div>}
     {error && <div className="rounded-lg bg-red-100 p-3 text-sm text-red-800">{error}</div>}
     <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-      {hasTransferredInvoices ? <>{renderFile("transferBank", "حوالات بنك فلسطين")}{renderFile("transferWallet", "حوالات المحفظة التجارية")}</> : <>{renderFile("invoiceBank", "فواتير بنك فلسطين")}{renderFile("invoiceWallet", "فواتير المحفظة التجارية")}{renderFile("transferBank", "حوالات بنك فلسطين")}{renderFile("transferWallet", "حوالات المحفظة التجارية")}</>}
+      {hasTransferredInvoices ? <>{renderFile("transferBank", "حوالات بنك فلسطين")}{renderFile("transferWallet", "حوالات بال بي")}{renderFile("transferJawwal", "حوالات جوال بي")}{transferPlatforms.map(renderExtraTransferFile)}</> : <>{renderFile("invoiceBank", "فواتير بنك فلسطين")}{renderFile("invoiceWallet", "فواتير بال بي")}{renderFile("transferBank", "حوالات بنك فلسطين")}{renderFile("transferWallet", "حوالات بال بي")}{renderFile("transferJawwal", "حوالات جوال بي")}</>}
     </div>
     <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 lg:grid-cols-8">
       {stageBStats.map(stat => <div key={stat.label} className={`rounded-xl border p-3 shadow-[0_3px_10px_rgba(30,64,175,0.06)] ${stat.color}`}>
@@ -1013,13 +1726,27 @@ function StageBPlatform({ invoices, onBack, onTransferVisaToC, onSafeActivities 
       </div>)}
     </div>
     {!!matches.length && <div className={`stage-b-results overflow-hidden rounded-xl border bg-white ${stageBView === "confirmed" ? "stage-b-confirmed" : ""}`}>
-      <div className="flex flex-wrap items-center gap-2 border-b bg-slate-50 p-3"><div className="flex gap-1 rounded-lg bg-white p-1"><button onClick={() => { setStageBView("pending"); setStageBPage(1); }} className={`rounded px-3 py-1.5 text-xs ${stageBView === "pending" ? "bg-amber-100 text-amber-800" : "text-slate-600"}`}>المنتظر {matches.filter(match => !["confirmed", "heldInvoice", "heldTransfer", "difference", "rejected"].includes(match.status)).length}</button><button onClick={() => { setStageBView("confirmed"); setStageBPage(1); }} className={`rounded px-3 py-1.5 text-xs ${stageBView === "confirmed" ? "bg-green-100 text-green-800" : "text-slate-600"}`}>المؤكد {matches.filter(match => match.status === "confirmed").length}</button><button onClick={() => { setStageBView("manual"); setStageBPage(1); }} className={`rounded px-3 py-1.5 text-xs ${stageBView === "manual" ? "bg-blue-100 text-blue-800" : "text-slate-600"}`}>مطابقة يدوية {matches.filter(match => ["heldInvoice", "heldTransfer", "difference", "rejected"].includes(match.status)).length}</button></div><input value={invoiceSearch} onChange={event => { setInvoiceSearch(event.target.value); setStageBPage(1); }} placeholder="بحث بالاسم أو البيان أو رقم المستخدم..." className="min-w-52 flex-1 rounded-lg border px-3 py-2 text-xs" /><input value={transferSearch} onChange={event => { setTransferSearch(event.target.value); setStageBPage(1); }} placeholder="بحث في الحوالات..." className="min-w-52 flex-1 rounded-lg border px-3 py-2 text-xs" /><select value={invoiceSort} onChange={event => { setInvoiceSort(event.target.value as StageBSort); setStageBPage(1); }} className="rounded-lg border bg-white px-3 py-2 text-xs"><option value="none">فواتير: بدون فرز</option><option value="name">فواتير: بالاسم</option><option value="amountDesc">فواتير: من الكبير للصغير</option><option value="amountAsc">فواتير: من الصغير للكبير</option></select><select value={transferSort} onChange={event => { setTransferSort(event.target.value as StageBSort); setStageBPage(1); }} className="rounded-lg border bg-white px-3 py-2 text-xs"><option value="none">حوالات: بدون فرز</option><option value="name">حوالات: بالاسم</option><option value="amountDesc">حوالات: من الكبير للصغير</option><option value="amountAsc">حوالات: من الصغير للكبير</option></select><select value={stageBAccountFilter} onChange={event => { setStageBAccountFilter(event.target.value); setStageBPage(1); }} className="rounded-lg border bg-white px-3 py-2 text-xs"><option value="all">كل الأنواع</option><option value="بنك فلسطين">بنك فلسطين</option><option value="محفظة تجارية">محفظة تجارية</option></select>      <button onClick={togglePage} className="rounded-lg border px-3 py-2 text-xs">{pageIsSelected ? "إلغاء تحديد الصفحة" : `تحديد الصفحة (${pagedMatches.length})`}</button><button onClick={confirmSelected} disabled={!selected.size} className="rounded-lg bg-blue-600 px-3 py-2 text-xs text-white disabled:opacity-40">حفظ المحدد ({selected.size})</button><button onClick={() => updateStatus(selected, "rejected")} disabled={!selected.size} className="rounded-lg bg-red-600 px-3 py-2 text-xs text-white disabled:opacity-40">رفض المحدد</button></div>
-      <div className="flex items-start gap-4"><div className="min-w-0 flex-1 overflow-auto"><table className="w-full min-w-[1000px] text-sm"><thead className="sticky top-0 z-10 bg-slate-100 text-xs"><tr><th className="p-3">      <input type="checkbox" checked={pagedMatches.length > 0 && pagedMatches.every(match => selected.has(match.id))} onChange={toggleAll} /></th><th className="p-3 text-right">الفاتورة / المستخدم</th><th className="p-3 text-right">المبلغ</th><th className="p-3 text-right">نوع الحساب</th><th className="p-3 text-right">الحوالة</th><th className="p-3 text-right">مبلغ الحوالة</th><th className="p-3 text-right">نوع الحساب</th><th className="p-3 text-right">الحالة</th><th className="p-3 text-right">إجراءات</th></tr></thead>            <tbody>{pagedMatches.map(match => <tr ref={row => { rowRefs.current[match.id] = row; }} key={match.id} className="border-t align-top"><td className="p-3"><input type="checkbox" checked={selected.has(match.id)} onChange={() => setSelected(prev => { const next = new Set(prev); if (next.has(match.id)) next.delete(match.id); else next.add(match.id); return next; })} /></td><td className="p-3 font-medium">{match.invoice.name}      <div className="text-[10px] text-slate-500">المستخدم: {match.invoice.userId || "—"} · الزبون: {match.invoice.customerNumber || "—"} · الفاتورة: {match.invoice.invoiceNumber || "—"} · الساعة: {match.invoice.registrationTime || "—"}</div></td><td className="p-3 font-mono">{fmtNum(match.invoice.amount)}</td><td className="p-3">{match.invoice.accountType || "—"}</td><td className="p-3">{match.transfer?.description || "لا توجد حوالة مناسبة"}</td><td className="p-3 font-mono">{match.transfer ? fmtNum(match.transfer.amount) : "—"}</td><td className="p-3">{match.transfer?.accountType || "—"}</td><td className="p-3"><span className={match.status === "confirmed" ? "text-green-700" : match.status === "difference" ? "text-orange-700" : match.status === "visa" ? "text-teal-700" : "text-amber-700"}>{match.status === "confirmed" ? "مؤكد ومطابق" : match.status === "rejected" ? "مرفوض" : match.status === "heldInvoice" ? "معلق: فاتورة" : match.status === "heldTransfer" ? "معلق: حوالة" : match.status === "held" ? "معلق" : match.status === "visa" ? "فيزا" : "فرق يحتاج تدقيق"}</span><div className="text-[10px] text-slate-500">{match.reason} · {match.score}%</div></td><td className="p-3"><div className="flex flex-wrap gap-1"><button onClick={() => { const one = new Set([match.id]); if (match.transfer) saveAliases([match]); updateStatus(one, "confirmed"); }} className="rounded border border-green-200 bg-green-50 px-2 py-1 text-[10px] text-green-700">تأكيد</button><button onClick={() => updateStatus(new Set([match.id]), "rejected")} className="rounded border border-red-200 bg-red-50 px-2 py-1 text-[10px] text-red-700">رفض</button>            <button onClick={() => openReplacement(match.id, "invoice")} className="rounded border border-emerald-200 bg-emerald-50 px-2 py-1 text-[10px] text-emerald-700">سحب كاشير</button><button onClick={() => openReplacement(match.id, "transfer")} className="rounded border border-blue-200 bg-blue-50 px-2 py-1 text-[10px] text-blue-700">سحب حوالة</button><button onClick={() => setDetailMatchId(detailMatchId === match.id ? null : match.id)} className="rounded border border-slate-200 bg-slate-50 px-2 py-1 text-[10px] text-slate-700" title="تفاصيل">i تفاصيل</button><button onClick={() => updateStatus(new Set([match.id]), "heldInvoice")} className="rounded border border-amber-200 bg-amber-50 px-2 py-1 text-[10px] text-amber-700">علق فاتورة</button><button onClick={() => updateStatus(new Set([match.id]), "heldTransfer")} className="rounded border border-amber-200 bg-amber-50 px-2 py-1 text-[10px] text-amber-700">علق حوالة</button>      {stageAVisaNumber(match.invoice.originalName) && <button onClick={() => updateStatus(new Set([match.id]), "visa")} className="rounded border border-teal-200 bg-teal-50 px-2 py-1 text-[10px] text-teal-700">ترحيل للفيزا</button>}</div></td></tr>)}            </tbody></table></div>{drawerMatchId && (() => { const current = matches.find(match => match.id === drawerMatchId); if (!current) return null;             const transferCandidates = transferData.filter(item => item.id !== current.transfer?.id && (!drawerMinAmount || item.receivedAmount >= Number(drawerMinAmount)) && (!drawerMaxAmount || item.receivedAmount <= Number(drawerMaxAmount))).slice(0, 30); const invoiceCandidates = invoiceData.filter(item => item.id !== current.invoice.id && (!drawerMinAmount || item.paidAmount >= Number(drawerMinAmount)) && (!drawerMaxAmount || item.paidAmount <= Number(drawerMaxAmount))).slice(0, 30);       return <aside className="replacement-drawer sticky top-3 shrink-0 rounded-xl border bg-white p-3 shadow-lg"><div className="mb-2 flex items-center justify-between"><strong className="text-sm">بحث واستبدال</strong><button onClick={() => setDrawerMatchId(null)} className="text-xs text-slate-500">إغلاق</button></div>      <div className="space-y-3">      {drawerMode === "invoice" && <section><p className="mb-1 text-[10px] font-bold text-emerald-700">بحث وسحب من الكاشير</p><input value={drawerInvoiceSearch} onChange={event => setDrawerInvoiceSearch(event.target.value)} placeholder="ابحث باسم أو مبلغ الفاتورة..." className="mb-2 w-full rounded-lg border px-2 py-1.5 text-xs" /><div className="max-h-48 space-y-1 overflow-auto">{invoiceCandidates.filter(item => !drawerInvoiceSearch || `${item.name} ${item.amount}`.toLowerCase().includes(drawerInvoiceSearch.toLowerCase())).map(item =>       <button key={item.id} onClick={() => replaceInvoice(current, item)} className={`block w-full rounded border p-2 text-right text-[10px] ${suggestionClass(Math.abs(item.paidAmount - current.invoice.paidAmount), stageBNameMatch(item.name, current.invoice.name, aliases))}`}>{item.name} · {fmtNum(item.paidAmount)} · المستخدم {item.userId || "—"}</button>)}      </div></section>}      <section className={drawerMode === "transfer" ? "" : "hidden"}><p className="mb-1 text-[10px] font-bold text-blue-700">بحث وسحب من الحوالات</p><input value={drawerTransferSearch} onChange={event => setDrawerTransferSearch(event.target.value)} placeholder="ابحث باسم أو مبلغ الحوالة..." className="mb-2 w-full rounded-lg border px-2 py-1.5 text-xs" /><div className="max-h-48 space-y-1 overflow-auto">{transferCandidates.filter(item => !drawerTransferSearch || `${item.description} ${item.receivedAmount}`.toLowerCase().includes(drawerTransferSearch.toLowerCase())).map(item =>       <button key={item.id} onClick={() => replaceTransfer(current, item)} className={`block w-full rounded border p-2 text-right text-[10px] ${suggestionClass(Math.abs(item.receivedAmount - current.invoice.paidAmount), stageBNameMatch(current.invoice.name, item.description, aliases))}`}>{item.description} · {fmtNum(item.receivedAmount)} · {item.accountType || "—"}</button>)}</div></section></div>            {detailMatchId === current.id && <div className="mt-3 rounded bg-slate-50 p-2 text-[10px]"><strong>تفاصيل الفاتورة:</strong><div className="mt-1 space-y-1"><div>الساعة: {current.invoice.registrationTime || "—"}</div><div>رقم الزبون: {current.invoice.customerNumber || "—"}</div><div>رقم الفاتورة: {current.invoice.invoiceNumber || "—"}</div><div>رقم المستخدم: {current.invoice.userId || "—"}</div></div><pre className="mt-1 max-h-28 overflow-auto whitespace-pre-wrap">      {JSON.stringify(current.invoice.raw, null, 2)}</pre></div>}      </aside>; })()}</div><div className="flex items-center justify-center gap-3 border-t bg-slate-50 p-3 text-xs"><button onClick={() => setStageBPage(page => Math.max(1, page - 1))} disabled={currentStageBPage === 1} className="rounded border px-3 py-1.5 disabled:opacity-40">السابق</button><span>صفحة {currentStageBPage} من {totalStageBPages} · عرض {pagedMatches.length} من {visibleMatches.length}</span><button onClick={() => setStageBPage(page => Math.min(totalStageBPages, page + 1))} disabled={currentStageBPage === totalStageBPages} className="rounded border px-3 py-1.5 disabled:opacity-40">التالي</button></div>
+      <div className="flex flex-wrap items-center gap-2 border-b bg-slate-50 p-3"><div className="flex gap-1 rounded-lg bg-white p-1"><button onClick={() => { setStageBView("pending"); setStageBPage(1); }} className={`rounded px-3 py-1.5 text-xs ${stageBView === "pending" ? "bg-amber-100 text-amber-800" : "text-slate-600"}`}>المنتظر {matches.filter(match => !["confirmed", "heldInvoice", "heldTransfer", "difference", "rejected"].includes(match.status)).length}</button><button onClick={() => { setStageBView("confirmed"); setStageBPage(1); }} className={`rounded px-3 py-1.5 text-xs ${stageBView === "confirmed" ? "bg-green-100 text-green-800" : "text-slate-600"}`}>المؤكد {matches.filter(match => match.status === "confirmed").length}</button><button onClick={() => { setStageBView("manual"); setStageBPage(1); }} className={`rounded px-3 py-1.5 text-xs ${stageBView === "manual" ? "bg-blue-100 text-blue-800" : "text-slate-600"}`}>مطابقة يدوية {matches.filter(match => ["heldInvoice", "heldTransfer", "difference", "rejected"].includes(match.status)).length}</button></div><input value={invoiceSearch} onChange={event => { setInvoiceSearch(event.target.value); setStageBPage(1); }} placeholder="بحث بالاسم أو البيان أو رقم المستخدم..." className="min-w-52 flex-1 rounded-lg border px-3 py-2 text-xs" /><input value={transferSearch} onChange={event => { setTransferSearch(event.target.value); setStageBPage(1); }} placeholder="بحث في الحوالات..." className="min-w-52 flex-1 rounded-lg border px-3 py-2 text-xs" /><select value={invoiceSort} onChange={event => { setInvoiceSort(event.target.value as StageBSort); setStageBPage(1); }} className="rounded-lg border bg-white px-3 py-2 text-xs"><option value="none">فواتير: بدون فرز</option><option value="name">فواتير: بالاسم</option><option value="amountDesc">فواتير: من الكبير للصغير</option><option value="amountAsc">فواتير: من الصغير للكبير</option></select><select value={transferSort} onChange={event => { setTransferSort(event.target.value as StageBSort); setStageBPage(1); }} className="rounded-lg border bg-white px-3 py-2 text-xs"><option value="none">حوالات: بدون فرز</option><option value="name">حوالات: بالاسم</option><option value="amountDesc">حوالات: من الكبير للصغير</option><option value="amountAsc">حوالات: من الصغير للكبير</option></select><select value={stageBAccountFilter} onChange={event => { setStageBAccountFilter(event.target.value); setStageBPage(1); }} className="rounded-lg border bg-white px-3 py-2 text-xs"><option value="all">كل الأنواع</option>{allTransferPlatforms.map(platform => <option key={platform} value={platform}>{platform}</option>)}</select>      <button onClick={togglePage} className="rounded-lg border px-3 py-2 text-xs">{pageIsSelected ? "إلغاء تحديد الصفحة" : `تحديد الصفحة (${pagedMatches.length})`}</button><button onClick={confirmSelected} disabled={!selected.size} className="rounded-lg bg-blue-600 px-3 py-2 text-xs text-white disabled:opacity-40">حفظ المحدد ({selected.size})</button><button onClick={() => updateStatus(selected, "rejected")} disabled={!selected.size} className="rounded-lg bg-red-600 px-3 py-2 text-xs text-white disabled:opacity-40">رفض المحدد</button></div>
+      <div className="mb-3 rounded-lg border border-indigo-100 bg-indigo-50 px-3 py-2 text-[11px] leading-5 text-indigo-900">اختصارات للصف المحدد (تعمل حتى مع تخطيط لوحة مفاتيح عربي): <b>R</b> أماكن الفاتورة · <b>T</b> بيانات الحوالة · <b>F</b> استبدال فاتورة · <b>H</b> استبدال حوالة · <b>X</b> رفض · <b>Space</b> تحديد مربع الاختيار · <b>↑/↓</b> أو <b>Tab</b> للتنقل بين مربعات الصفوف.</div><div className="flex items-start gap-4"><div className="min-w-0 flex-1 overflow-auto"><table className="w-full min-w-[1000px] text-sm"><thead className="sticky top-0 z-10 bg-slate-100 text-xs"><tr><th className="p-3">      <input type="checkbox" checked={pagedMatches.length > 0 && pagedMatches.every(match => selected.has(match.id))} onChange={toggleAll} /></th><th className="p-3 text-right">الفاتورة / المستخدم</th><th className="p-3 text-right">المبلغ</th><th className="p-3 text-right">نوع الحساب</th><th className="p-3 text-right">الحوالة</th><th className="p-3 text-right">مبلغ الحوالة</th><th className="p-3 text-right">نوع الحساب</th><th className="p-3 text-right">الحالة</th><th className="p-3 text-right">إجراءات</th></tr></thead>            <tbody>{pagedMatches.map(match => <tr ref={row => { rowRefs.current[match.id] = row; stageBCheckboxRefs.current[match.id] = row?.querySelector<HTMLInputElement>("input[type=checkbox]") ?? null; }} key={match.id} className="border-t align-top"><td className="p-3"><input type="checkbox" checked={selected.has(match.id)} onFocus={() => setActiveStageBMatchId(match.id)} onClick={() => setActiveStageBMatchId(match.id)} onChange={() => setSelected(prev => { const next = new Set(prev); if (next.has(match.id)) next.delete(match.id); else next.add(match.id); return next; })} /></td><td className="p-3 font-medium">{match.invoice.name}      <div className="text-[10px] text-slate-500">المستخدم: {match.invoice.userId || "—"} · الزبون: {match.invoice.customerNumber || "—"} · الفاتورة: {match.invoice.invoiceNumber || "—"} · الساعة: {match.invoice.registrationTime || "—"}</div></td><td className="p-3 font-mono">{fmtNum(match.invoice.amount)}</td><td className="p-3">{match.invoice.accountType || "—"}</td><td className="p-3">{match.transfer?.description || "لا توجد حوالة مناسبة"}</td><td className="p-3 font-mono">{match.transfer ? fmtNum(match.transfer.amount) : "—"}</td><td className="p-3">{match.transfer?.accountType || "—"}</td><td className="p-3"><span className={match.status === "confirmed" ? "text-green-700" : match.status === "difference" ? "text-orange-700" : match.status === "visa" ? "text-teal-700" : "text-amber-700"}>{match.status === "confirmed" ? "مؤكد ومطابق" : match.status === "rejected" ? "مرفوض" : match.status === "heldInvoice" ? "معلق: فاتورة" : match.status === "heldTransfer" ? "معلق: حوالة" : match.status === "held" ? "معلق" : match.status === "visa" ? "فيزا" : "فرق يحتاج تدقيق"}</span><div className="text-[10px] text-slate-500">{match.reason} · {match.score}%</div></td><td className="p-3"><div className="flex flex-wrap gap-1"><button onClick={() => { const one = new Set([match.id]); if (match.transfer) saveAliases([match]); updateStatus(one, "confirmed"); }} className="rounded border border-green-200 bg-green-50 px-2 py-1 text-[10px] text-green-700">تأكيد</button><button onClick={() => updateStatus(new Set([match.id]), "rejected")} className="rounded border border-red-200 bg-red-50 px-2 py-1 text-[10px] text-red-700">رفض</button>            <button onClick={() => openReplacement(match.id, "invoice")} className="rounded border border-emerald-200 bg-emerald-50 px-2 py-1 text-[10px] text-emerald-700">سحب كاشير</button><button onClick={() => openReplacement(match.id, "transfer")} className="rounded border border-blue-200 bg-blue-50 px-2 py-1 text-[10px] text-blue-700">سحب حوالة</button><button onClick={() => openDetails(match.id, "invoice")} className="rounded border border-slate-200 bg-slate-50 px-2 py-1 text-[10px] text-slate-700" title="تفاصيل">i تفاصيل</button><button onClick={() => updateStatus(new Set([match.id]), "heldInvoice")} className="rounded border border-amber-200 bg-amber-50 px-2 py-1 text-[10px] text-amber-700">علق فاتورة</button><button onClick={() => updateStatus(new Set([match.id]), "heldTransfer")} className="rounded border border-amber-200 bg-amber-50 px-2 py-1 text-[10px] text-amber-700">علق حوالة</button>      {stageAVisaNumber(match.invoice.originalName) && <button onClick={() => updateStatus(new Set([match.id]), "visa")} className="rounded border border-teal-200 bg-teal-50 px-2 py-1 text-[10px] text-teal-700">ترحيل للفيزا</button>}</div></td></tr>)}            </tbody></table></div>{drawerMatchId && (() => { const current = matches.find(match => match.id === drawerMatchId); if (!current) return null;             const transferCandidates = transferData.filter(item => item.id !== current.transfer?.id && (!drawerMinAmount || item.receivedAmount >= Number(drawerMinAmount)) && (!drawerMaxAmount || item.receivedAmount <= Number(drawerMaxAmount))).slice(0, 30); const invoiceCandidates = invoiceData.filter(item => item.id !== current.invoice.id && (!drawerMinAmount || item.paidAmount >= Number(drawerMinAmount)) && (!drawerMaxAmount || item.paidAmount <= Number(drawerMaxAmount))).slice(0, 30);       return <aside className="replacement-drawer sticky top-3 shrink-0 rounded-xl border bg-white p-3 shadow-lg"><div className="mb-2 flex items-center justify-between"><strong className="text-sm">بحث واستبدال</strong><button onClick={() => setDrawerMatchId(null)} className="text-xs text-slate-500">إغلاق</button></div>      <div className="space-y-3">      {drawerMode === "invoice" && <section><p className="mb-1 text-[10px] font-bold text-emerald-700">بحث وسحب من الكاشير</p><input value={drawerInvoiceSearch} onChange={event => setDrawerInvoiceSearch(event.target.value)} placeholder="ابحث باسم أو مبلغ الفاتورة..." className="mb-2 w-full rounded-lg border px-2 py-1.5 text-xs" /><div className="max-h-48 space-y-1 overflow-auto">{invoiceCandidates.filter(item => !drawerInvoiceSearch || `${item.name} ${item.amount}`.toLowerCase().includes(drawerInvoiceSearch.toLowerCase())).map(item =>       <button key={item.id} onClick={() => replaceInvoice(current, item)} className={`block w-full rounded border p-2 text-right text-[10px] ${suggestionClass(Math.abs(item.paidAmount - current.invoice.paidAmount), stageBNameMatch(item.name, current.invoice.name, aliases))}`}>{item.name} · {fmtNum(item.paidAmount)} · المستخدم {item.userId || "—"}</button>)}      </div></section>}      <section className={drawerMode === "transfer" ? "" : "hidden"}><p className="mb-1 text-[10px] font-bold text-blue-700">بحث وسحب من الحوالات</p><input value={drawerTransferSearch} onChange={event => setDrawerTransferSearch(event.target.value)} placeholder="ابحث باسم أو مبلغ الحوالة..." className="mb-2 w-full rounded-lg border px-2 py-1.5 text-xs" /><div className="max-h-48 space-y-1 overflow-auto">{transferCandidates.filter(item => !drawerTransferSearch || `${item.description} ${item.receivedAmount}`.toLowerCase().includes(drawerTransferSearch.toLowerCase())).map(item =>       <button key={item.id} onClick={() => replaceTransfer(current, item)} className={`block w-full rounded border p-2 text-right text-[10px] ${suggestionClass(Math.abs(item.receivedAmount - current.invoice.paidAmount), stageBNameMatch(current.invoice.name, item.description, aliases))}`}>{item.description} · {fmtNum(item.receivedAmount)} · {item.accountType || "—"}</button>)}</div></section></div>            {detailMatchId === current.id && <div className="mt-3 rounded bg-slate-50 p-2 text-[10px]"><strong>تفاصيل الفاتورة:</strong><div className="mt-1 space-y-1"><div>الساعة: {current.invoice.registrationTime || "—"}</div><div>رقم الزبون: {current.invoice.customerNumber || "—"}</div><div>رقم الفاتورة: {current.invoice.invoiceNumber || "—"}</div><div>رقم المستخدم: {current.invoice.userId || "—"}</div></div><pre className="mt-1 max-h-28 overflow-auto whitespace-pre-wrap">      {JSON.stringify(current.invoice.raw, null, 2)}</pre></div>}      </aside>; })()}</div><div className="flex items-center justify-center gap-3 border-t bg-slate-50 p-3 text-xs"><button onClick={() => setStageBPage(page => Math.max(1, page - 1))} disabled={currentStageBPage === 1} className="rounded border px-3 py-1.5 disabled:opacity-40">السابق</button><span>صفحة {currentStageBPage} من {totalStageBPages} · عرض {pagedMatches.length} من {visibleMatches.length}</span><button onClick={() => setStageBPage(page => Math.min(totalStageBPages, page + 1))} disabled={currentStageBPage === totalStageBPages} className="rounded border px-3 py-1.5 disabled:opacity-40">التالي</button></div>
     </div>}
+    {detailMatchId && (() => {
+      const match = matches.find(item => item.id === detailMatchId);
+      if (!match) return null;
+      const values = detailMode === "invoice"
+        ? [["الاسم", match.invoice.name], ["رقم الفاتورة", match.invoice.invoiceNumber], ["رقم الزبون", match.invoice.customerNumber], ["رقم المستخدم", match.invoice.userId], ["المبلغ", fmtNum(match.invoice.amount)], ["نوع الحساب", match.invoice.accountType || match.invoice.source], ["التاريخ", match.invoice.date], ["الوقت", match.invoice.registrationTime]]
+        : [["البيان", match.transfer?.description || "لا توجد حوالة مرتبطة"], ["المبلغ", match.transfer ? fmtNum(match.transfer.amount) : "—"], ["نوع الحساب", match.transfer?.accountType || "—"], ["التاريخ", match.transfer?.date || "—"]];
+      return <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 p-4" role="dialog" aria-modal="true" aria-label={detailMode === "invoice" ? "بيانات الفاتورة" : "بيانات الحوالة"} onMouseDown={event => { if (event.target === event.currentTarget) setDetailMatchId(null); }}>
+        <section className="w-full max-w-xl rounded-2xl bg-white p-5 shadow-2xl">
+          <header className="flex items-center justify-between gap-3 border-b pb-3"><h2 className="text-base font-bold">{detailMode === "invoice" ? "بيانات الفاتورة" : "بيانات الحوالة"}</h2><button type="button" onClick={() => setDetailMatchId(null)} className="rounded-lg border px-3 py-1.5 text-xs hover:bg-slate-50">إغلاق (Esc)</button></header>
+          <dl className="mt-4 grid gap-2 sm:grid-cols-2">{values.map(([label, value]) => <div key={label} className="rounded-lg bg-slate-50 p-3"><dt className="text-[11px] text-slate-500">{label}</dt><dd className="mt-1 break-words text-sm font-semibold text-slate-900">{value || "—"}</dd></div>)}</dl>
+        </section>
+      </div>;
+    })()}
   </div></div>;
 }
 
 interface StageCMatch {
+  kind: "invoice" | "sony-only";
   invoice: StageAResult;
   sonyName: string;
   sonyAmount: number;
@@ -1029,11 +1756,15 @@ interface StageCMatch {
   issue: string;
 }
 
-interface StageDPending {
+export interface StageDBankInput {
+  id?: string;
   description: string;
   amount: number;
-  visaNumber: string;
   date: string;
+}
+
+interface StageDPending extends StageDBankInput {
+  authNumber: string;
 }
 
 function extractFourDigitVisa(value: string): string {
@@ -1041,7 +1772,17 @@ function extractFourDigitVisa(value: string): string {
   return matches?.[matches.length - 1] || "";
 }
 
-function StageDPlatform({ matches, pending, onBack }: { matches: StageCMatch[]; pending: StageDPending[]; onBack: () => void }) {
+function extractMerchantAuthorizationNumber(description: string): string {
+  const numbers = description.match(/\d+/g) || [];
+  const candidate = numbers.length >= 3 ? numbers[1] : numbers.find(number => number.length === 6);
+  return candidate?.length === 6 ? candidate : "";
+}
+
+function normalizeAuthorizationNumber(value: string): string {
+  return value.replace(/\D/g, "");
+}
+
+function StageDPlatform({ matches, pending, onBack }: { matches: StageCMatch[]; pending: StageDBankInput[]; onBack: () => void }) {
   const [file, setFile] = useState<File | null>(null);
   const [headers, setHeaders] = useState<string[]>([]);
   const [rawRows, setRawRows] = useState<Record<string, unknown>[]>([]);
@@ -1060,19 +1801,58 @@ function StageDPlatform({ matches, pending, onBack }: { matches: StageCMatch[]; 
       setError(null);
     } catch (e) { setError((e as Error).message); }
   };
-  const pendingRows = rawRows
-    .filter(row => String(row[map.description] ?? "").includes("مشتريات عمولة تجار"))
-    .map(row => ({ description: String(row[map.description] ?? ""), amount: parseAmount(row[map.amount]), visaNumber: extractFourDigitVisa(String(row[map.description] ?? "")), date: String(row[map.date] ?? "") }));
-  const rows = pendingRows.map(bank => {
-    const match = matches.find(item => item.matched && item.sonyVisa === bank.visaNumber && Math.abs(item.invoice.amount - bank.amount) <= 0.01);
+  const uploadedRows = rawRows
+    .filter(row => isMerchantPurchaseBankDescription(String(row[map.description] ?? "")))
+    .map((row, index) => ({ id: `upload-${index}`, description: String(row[map.description] ?? ""), amount: parseAmount(row[map.amount]), date: String(row[map.date] ?? "") }));
+  const pendingRows = uploadedRows.length ? [...pending, ...uploadedRows] : pending;
+  const bankRows: StageDPending[] = pendingRows.map(bank => ({
+    ...bank,
+    authNumber: extractMerchantAuthorizationNumber(bank.description)
+  }));
+  const usedAuthorizations = new Set<string>();
+  const rows = bankRows.map(bank => {
+    const authorization = normalizeAuthorizationNumber(bank.authNumber);
+    const match = authorization ? matches.find(item => {
+      if (!item.authNumber) return false;
+      return item.authNumber.split(/\s*\+\s*/)
+        .some(number => normalizeAuthorizationNumber(number) === authorization && !usedAuthorizations.has(normalizeAuthorizationNumber(number)));
+    }) : undefined;
+    if (match) usedAuthorizations.add(authorization);
     return { bank, match };
   });
+  const invoiceRows = matches.filter(item => item.kind === "invoice");
+  const unmatchedInvoices = invoiceRows.filter(item =>
+    !item.authNumber || !item.authNumber.split(/\s*\+\s*/).some(number => usedAuthorizations.has(normalizeAuthorizationNumber(number)))
+  );
+  const unmatchedSonyRows = matches.filter(item => item.kind === "sony-only" &&
+    !item.authNumber.split(/\s*\+\s*/).some(number => usedAuthorizations.has(normalizeAuthorizationNumber(number)))
+  );
+  const reportRows = [
+    ...rows.map(({ bank, match }) => [
+      "مشتريات تجار", bank.description, bank.date, bank.amount, bank.authNumber,
+      match?.kind === "invoice" ? match.invoice.name : match?.sonyName || "",
+      match?.sonyVisa || "", match?.authNumber || "",
+      match ? match.kind === "invoice" ? "مطابق بالتفويض" : "تفويض مطابق، دون فاتورة في C" : bank.authNumber ? "مشتريات زائدة بلا تفويض سوني مطابق" : "رقم التفويض غير موجود"
+    ]),
+    ...unmatchedInvoices.map(item => [
+      "فاتورة فيزا", item.invoice.originalName, "", item.invoice.amount, "",
+      item.invoice.name, stageAVisaNumber(item.invoice.originalName), item.authNumber,
+      item.matched ? "فاتورة لم تطابق مشتريات التجار في D" : "فاتورة لم تطابق سوني في C"
+    ]),
+    ...unmatchedSonyRows.map(item => [
+      "حركة سوني زائدة", item.sonyName, "", item.sonyAmount, "",
+      "", item.sonyVisa, item.authNumber, "حركة سوني بلا فاتورة أو مشتريات تجار مطابقة"
+    ])
+  ];
   const exportStageD = () => {
     const workbook = XLSX.utils.book_new();
     const sheet = XLSX.utils.aoa_to_sheet([
-      ["بيان الحوالة المعلقة", "التاريخ", "مبلغ الحوالة", "رقم الفيزا", "اسم الزبون", "مبلغ الفاتورة", "رقم التفويض", "الحالة"],
-      ...rows.map(({ bank, match }) => [bank.description, bank.date, bank.amount, bank.visaNumber, match?.invoice.name || "", match?.invoice.amount || "", match?.authNumber || "", match ? "مطابق" : "غير مطابق"])
+      ["نوع السجل", "البيان", "التاريخ", "المبلغ", "تفويض البيان البنكي", "اسم الزبون", "رقم الفيزا", "تفويض سوني", "الحالة"],
+      ...reportRows
     ]);
+    sheet["!cols"] = [18, 44, 16, 14, 22, 28, 14, 20, 42].map(wch => ({ wch }));
+    sheet["!autofilter"] = { ref: sheet["!ref"] || "A1:I1" };
+    sheet["!rows"] = [{ hpt: 26 }];
     XLSX.utils.book_append_sheet(workbook, sheet, "مطابقة D");
     XLSX.writeFile(workbook, "مطابقة_الفيزا_المرحلة_D.xlsx");
   };
@@ -1080,61 +1860,184 @@ function StageDPlatform({ matches, pending, onBack }: { matches: StageCMatch[]; 
     <div className="mx-auto max-w-6xl space-y-5">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <button onClick={onBack} className="flex items-center gap-1 text-sm text-slate-500 hover:text-blue-600"><ChevronLeft className="h-4 w-4" />العودة إلى C</button>
-        <h1 className="text-xl font-black">D — مطابقة حوالات الغد مع مطابقة C</h1>
-        <button onClick={exportStageD} disabled={!rows.length} className="rounded-lg bg-green-600 px-4 py-2 text-sm font-medium text-white disabled:opacity-40"><Download className="mr-1 inline h-4 w-4" />تصدير مطابقة D</button>
+        <h1 className="text-xl font-black">D — مطابقة مشتريات التجار مع تفويضات سوني</h1>
+        <button onClick={exportStageD} disabled={!reportRows.length} className="rounded-lg bg-green-600 px-4 py-2 text-sm font-medium text-white disabled:opacity-40"><Download className="mr-1 inline h-4 w-4" />تصدير مطابقة D</button>
       </div>
-      <div className="rounded-xl border border-indigo-200 bg-indigo-50 p-4 text-sm text-indigo-900">ارفع حوالات «مشتريات عمولة تجار» هنا. تتم المطابقة برقم الفيزا المكوّن من 4 أرقام والمبلغ، ويظهر رقم التفويض القادم من ملف سوني كاشير.</div>
+      <div className="rounded-xl border border-indigo-200 bg-indigo-50 p-4 text-sm text-indigo-900">تتم مطابقة مشتريات عمولة التجار مع رقم التفويض المحفوظ من سوني كاشير. يُقرأ رقم التفويض من الجزء الأوسط في البيان، مثل 725047 في 65880/725047/30285.</div>
       {error && <div className="rounded-lg bg-red-100 p-3 text-sm text-red-800">{error}</div>}
       <div className="rounded-xl border border-indigo-200 bg-white p-4">
-        <h2 className="mb-3 text-sm font-bold text-indigo-800">حوالات بنكية معلقة — مشتريات عمولة تجار</h2>
+        <h2 className="mb-3 text-sm font-bold text-indigo-800">حركات بنكية معلقة — مشتريات عمولة تجار</h2>
+        {pending.length > 0 && <p className="mb-2 rounded-lg bg-indigo-50 p-3 text-xs text-indigo-800">تم ترحيل {pending.length} حركة من المعلّقات.</p>}
         <DropZone file={file} onFile={loadFile} onClear={() => { setFile(null); setHeaders([]); setRawRows([]); }} />
         {!!headers.length && <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-3">
           <Sel label="بيان الحوالة" headers={headers} value={map.description} onChange={value => setMap(prev => ({ ...prev, description: value }))} />
           <Sel label="المبلغ" headers={headers} value={map.amount} onChange={value => setMap(prev => ({ ...prev, amount: value }))} />
           <Sel label="التاريخ" headers={headers} value={map.date} onChange={value => setMap(prev => ({ ...prev, date: value }))} />
         </div>}
-        <p className="mt-2 text-xs text-slate-500">سيتم اعتماد الصفوف التي تحتوي على «مشتريات عمولة تجار» فقط: {pendingRows.length} حوالة.</p>
+        <p className="mt-2 text-xs text-slate-500">عدد حركات مشتريات التجار في هذه الدفعة: {bankRows.length}.</p>
       </div>
       <div className="overflow-hidden rounded-xl border border-slate-200 bg-white">
-        <table className="w-full text-sm"><thead className="bg-slate-100 text-xs"><tr><th className="p-3 text-right">بيان الحوالة</th><th className="p-3 text-right">المبلغ</th><th className="p-3 text-right">رقم الفيزا</th><th className="p-3 text-right">اسم الزبون</th><th className="p-3 text-right">رقم التفويض</th><th className="p-3 text-right">الحالة</th></tr></thead>
-          <tbody>{rows.map(({ bank, match }) => <tr key={`${bank.description}-${bank.date}-${bank.amount}`} className="border-t"><td className="p-3">{bank.description}</td><td className="p-3 font-mono">{fmtNum(bank.amount)}</td><td className="p-3 font-mono">{bank.visaNumber || "—"}</td><td className="p-3">{match?.invoice.name || "—"}</td><td className="p-3 font-mono">{match?.authNumber || "—"}</td><td className={`p-3 font-semibold ${match ? "text-green-700" : "text-red-700"}`}>{match ? "مطابق" : "غير مطابق"}</td></tr>)}</tbody>
+        <table className="w-full text-sm"><thead className="bg-slate-100 text-xs"><tr><th className="p-3 text-right">نوع السجل</th><th className="p-3 text-right">البيان</th><th className="p-3 text-right">التاريخ</th><th className="p-3 text-right">المبلغ</th><th className="p-3 text-right">تفويض البيان البنكي</th><th className="p-3 text-right">اسم الزبون</th><th className="p-3 text-right">رقم الفيزا</th><th className="p-3 text-right">تفويض سوني</th><th className="p-3 text-right">الحالة</th></tr></thead>
+          <tbody>{reportRows.map((reportRow, index) => <tr key={`${reportRow[0]}-${index}`} className="border-t"><td className="p-3">{reportRow[0]}</td><td className="p-3">{reportRow[1]}</td><td className="p-3">{reportRow[2] || "—"}</td><td className="p-3 font-mono">{reportRow[3] ? fmtNum(Number(reportRow[3])) : "—"}</td><td className="p-3 font-mono">{reportRow[4] || "—"}</td><td className="p-3">{reportRow[5] || "—"}</td><td className="p-3 font-mono">{reportRow[6] || "—"}</td><td className="p-3 font-mono">{reportRow[7] || "—"}</td><td className="p-3">{reportRow[8]}</td></tr>)}</tbody>
         </table>
-        {!rows.length && <div className="p-10 text-center text-sm text-slate-500">لا توجد حوالات مرحّلة إلى D.</div>}
+        {!reportRows.length && <div className="p-10 text-center text-sm text-slate-500">لا توجد فواتير أو حركات لعرضها في D.</div>}
+        {!!(unmatchedInvoices.length + unmatchedSonyRows.length) && <div className="border-t bg-amber-50 p-3 text-xs text-amber-900">
+          غير مرتبطة في D: {unmatchedInvoices.length} فاتورة و{unmatchedSonyRows.length} حركة سوني زائدة.
+        </div>}
       </div>
     </div>
   </div>;
 }
 
-function StageCPlatform({ invoices, onBack, onTransferToD, onSafeActivities }: { invoices: StageAResult[]; onBack: () => void; onTransferToD?: (matches: StageCMatch[], pending: StageDPending[]) => void; onSafeActivities?: (activities: string[]) => void }) {
+function StageCPlatform({ invoices, pendingBankInputs, onBack, onTransferToD, onSafeActivities }: { invoices: StageAResult[]; pendingBankInputs: StageDBankInput[]; onBack: () => void; onTransferToD?: (matches: StageCMatch[], pending: StageDBankInput[]) => void; onSafeActivities?: (activities: string[]) => void }) {
   const [file, setFile] = useState<File | null>(null);
+  const [sonyFileName, setSonyFileName] = useState("");
   const [headers, setHeaders] = useState<string[]>([]);
   const [rows, setRows] = useState<Record<string, unknown>[]>([]);
   const [map, setMap] = useState({ name: "", amount: "", auth: "" });
+  const [invoiceFile, setInvoiceFile] = useState<File | null>(null);
+  const [invoiceFileName, setInvoiceFileName] = useState("");
+  const [invoiceHeaders, setInvoiceHeaders] = useState<string[]>([]);
+  const [invoiceRows, setInvoiceRows] = useState<Record<string, unknown>[]>([]);
+  const [invoiceMap, setInvoiceMap] = useState({ name: "", amount: "" });
   const [results, setResults] = useState<StageCMatch[]>([]);
+  const stageCDataLoaded = useRef(false);
   const [page, setPage] = useState(1);
   const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    storageGet<any>("stage_c_platform_session", null).then(session => {
+      if (session) {
+        setSonyFileName(session.sonyFileName ?? "");
+        setHeaders(session.headers ?? []);
+        setRows(session.rows ?? []);
+        setMap(session.map ?? { name: "", amount: "", auth: "" });
+        setInvoiceFileName(session.invoiceFileName ?? "");
+        setInvoiceHeaders(session.invoiceHeaders ?? []);
+        setInvoiceRows(session.invoiceRows ?? []);
+        setInvoiceMap(session.invoiceMap ?? { name: "", amount: "" });
+        setResults(session.results ?? []);
+      }
+      stageCDataLoaded.current = true;
+    });
+  }, []);
+  useEffect(() => {
+    if (!stageCDataLoaded.current) return;
+    void storageSet("stage_c_platform_session", {
+      sonyFileName, headers, rows, map, invoiceFileName, invoiceHeaders, invoiceRows, invoiceMap, results,
+    });
+  }, [sonyFileName, headers, rows, map, invoiceFileName, invoiceHeaders, invoiceRows, invoiceMap, results]);
   const parseAmount = (value: unknown) => Number.parseFloat(String(value ?? "").replace(/[٫٬]/g, match => match === "٫" ? "." : "").replace(/,/g, "")) || 0;
+  const loadInvoiceFile = async (nextFile: File) => {
+    try {
+      const parsed = parseSheet(await readFileBuf(nextFile));
+      setInvoiceFile(nextFile);
+      setInvoiceFileName(nextFile.name);
+      setInvoiceHeaders(parsed.headers);
+      setInvoiceRows(parsed.rows);
+      setInvoiceMap({
+        name: autoDetect(parsed.headers, HINTS.name),
+        amount: detectCardPaidColumn(parsed.headers) || autoDetect(parsed.headers, ["paid", "مدفوع", "المبلغ المدفوع"]) || autoDetect(parsed.headers, HINTS.debit) || autoDetect(parsed.headers, ["amount", "مبلغ"])
+      });
+      setError(null);
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  };
+  const effectiveInvoices = useMemo(() => {
+    if (invoices.length) return invoices;
+    return invoiceRows.map((row, index) => {
+      const originalName = String(row[invoiceMap.name] ?? "").trim();
+      const name = originalName.replace(/(?:^|\D)\d{4}(?=\D|$)/, " ").replace(/\s+/g, " ").trim();
+      return {
+        id: index,
+        source: "فاتورة فيزا مرفوعة مباشرة",
+        name,
+        originalName,
+        amount: parseAmount(row[invoiceMap.amount]),
+        databaseName: "",
+        databaseAmount: 0,
+        invoiceTotal: 0,
+        cashAmount: 0,
+        checkAmount: 0,
+        debtAmount: 0,
+        discountAmount: 0,
+        type: "مدفوع" as const,
+        userId: "",
+        invoiceDate: "",
+        registrationTime: "",
+        customerNumber: "",
+        invoiceNumber: stageAVisaNumber(originalName),
+        accountType: "",
+        invoice: row,
+        matched: true,
+        issue: "",
+        category: "فيزا" as const,
+        categoryIssue: ""
+      };
+    }).filter(invoice => invoice.name || invoice.amount);
+  }, [invoices, invoiceRows, invoiceMap]);
   const loadSonyFile = async (nextFile: File) => {
     try {
       const parsed = parseSheet(await readFileBuf(nextFile));
       setFile(nextFile); setHeaders(parsed.headers); setRows(parsed.rows);
-      setMap({ name: autoDetect(parsed.headers, HINTS.name), amount: detectCardPaidColumn(parsed.headers) || autoDetect(parsed.headers, HINTS.debit) || autoDetect(parsed.headers, ["amount", "مبلغ"]), auth: autoDetect(parsed.headers, HINTS.authNum) });
+      setSonyFileName(nextFile.name);
+      setMap({ name: autoDetect(parsed.headers, HINTS.name), amount: detectCardPaidColumn(parsed.headers) || autoDetect(parsed.headers, HINTS.debit) || autoDetect(parsed.headers, ["amount", "مبلغ"]), auth: detectAuthorizationColumn(parsed.headers) });
       setError(null);
     } catch (e) { setError((e as Error).message); }
   };
   const runStageC = () => {
-    if (!invoices.length) { setError("لا توجد فواتير فيزا مرحّلة من المرحلة A"); return; }
+    if (!effectiveInvoices.length) { setError("رحّل فواتير الفيزا من A أو ارفع ملف فواتير الفيزا هنا أولاً"); return; }
     if (!rows.length || !map.name || !map.amount) { setError("ارفع ملف سوني كاشير وحدد عمود البيان والمبلغ أولاً"); return; }
-    const sonyRows = rows.map((row, index) => ({ index, name: String(row[map.name] ?? "").trim(), amount: parseAmount(row[map.amount]), visa: stageAVisaNumber(String(row[map.name] ?? "")), auth: String(row[map.auth] ?? "").trim(), used: false }));
-    setResults(invoices.map(invoice => {
+    const sonyRows = rows.map((row, index) => ({ index, name: String(row[map.name] ?? "").trim(), amount: parseAmount(row[map.amount]), visa: stageAVisaNumber(String(row[map.name] ?? "")), auth: String(row[map.auth] ?? "").trim(), used: false }))
+      .filter(row => row.name || row.amount || row.visa);
+    const invoiceResults = effectiveInvoices.map(invoice => {
       const visa = stageAVisaNumber(invoice.originalName);
-      const direct = sonyRows.find(row => !row.used && row.visa === visa && Math.abs(row.amount - invoice.amount) <= 0.01);
-      if (direct) { direct.used = true; return { invoice, sonyName: direct.name, sonyAmount: direct.amount, sonyVisa: direct.visa, authNumber: direct.auth, matched: true, issue: "" }; }
-      const group = sonyRows.filter(row => !row.used && row.visa === visa);
+      const direct = visa ? sonyRows.find(row => !row.used && row.visa === visa && Math.abs(row.amount - invoice.amount) <= 0.01) : undefined;
+      if (direct) { direct.used = true; return { kind: "invoice" as const, invoice, sonyName: direct.name, sonyAmount: direct.amount, sonyVisa: direct.visa, authNumber: direct.auth, matched: true, issue: "" }; }
+      const group = visa ? sonyRows.filter(row => !row.used && row.visa === visa) : [];
       const grouped = group.length > 1 ? group.reduce((sum, row) => sum + row.amount, 0) : 0;
-      if (grouped && Math.abs(grouped - invoice.amount) <= 0.01) { group.forEach(row => { row.used = true; }); return { invoice, sonyName: group.map(row => row.name).join(" + "), sonyAmount: grouped, sonyVisa: visa, authNumber: group.map(row => row.auth).filter(Boolean).join(" + "), matched: true, issue: "مطابقة مجمعة" }; }
-      return { invoice, sonyName: "", sonyAmount: 0, sonyVisa: visa, authNumber: "", matched: false, issue: visa ? "رقم الفيزا موجود لكن الرقم أو المبلغ غير موجود في سوني" : "لم يتم العثور على رقم فيزا من 4 أرقام" };
-    }));
+      if (grouped && Math.abs(grouped - invoice.amount) <= 0.01) { group.forEach(row => { row.used = true; }); return { kind: "invoice" as const, invoice, sonyName: group.map(row => row.name).join(" + "), sonyAmount: grouped, sonyVisa: visa, authNumber: group.map(row => row.auth).filter(Boolean).join(" + "), matched: true, issue: "مطابقة مجمعة" }; }
+      return { kind: "invoice" as const, invoice, sonyName: "", sonyAmount: 0, sonyVisa: visa, authNumber: "", matched: false, issue: visa ? "رقم الفيزا موجود لكن الرقم أو المبلغ غير موجود في سوني" : "لم يتم العثور على رقم فيزا من 4 أرقام" };
+    });
+    const unmatchedSonyResults: StageCMatch[] = sonyRows.filter(row => !row.used).map(row => {
+      const invoice: StageAResult = {
+        id: row.index,
+        source: "حركة سوني كاشير",
+        name: row.name.replace(/(?:^|\D)\d{4}(?=\D|$)/, " ").replace(/\s+/g, " ").trim(),
+        originalName: row.name,
+        amount: row.amount,
+        databaseName: "",
+        databaseAmount: 0,
+        invoiceTotal: 0,
+        cashAmount: 0,
+        checkAmount: 0,
+        debtAmount: 0,
+        discountAmount: 0,
+        type: "مدفوع",
+        userId: "",
+        invoiceDate: "",
+        registrationTime: "",
+        customerNumber: "",
+        invoiceNumber: row.visa,
+        accountType: "",
+        invoice: rows[row.index],
+        matched: false,
+        issue: "حركة سوني لا تقابل فاتورة فيزا",
+        category: "فيزا",
+        categoryIssue: ""
+      };
+      return {
+        kind: "sony-only",
+        invoice,
+        sonyName: row.name,
+        sonyAmount: row.amount,
+        sonyVisa: row.visa,
+        authNumber: row.auth,
+        matched: false,
+        issue: "حركة سوني زائدة بلا فاتورة مطابقة"
+      };
+    });
+    setResults([...invoiceResults, ...unmatchedSonyResults]);
     setPage(1);
     setError(null);
   };
@@ -1142,7 +2045,28 @@ function StageCPlatform({ invoices, onBack, onTransferToD, onSafeActivities }: {
   const totalPages = Math.max(1, Math.ceil(results.length / pageSize));
   const currentPage = Math.min(page, totalPages);
   const pagedResults = results.slice((currentPage - 1) * pageSize, currentPage * pageSize);
-  const exportStageC = () => { const workbook = XLSX.utils.book_new(); const sheet = XLSX.utils.aoa_to_sheet([["اسم الزبون", "رقم الفيزا", "مبلغ الفاتورة", "رقم التفويض", "بيان سوني", "مبلغ سوني", "الحالة", "ملاحظة"], ...results.map(result => [result.invoice.name, result.sonyVisa, result.invoice.amount, result.authNumber, result.sonyName, result.sonyAmount || "", result.matched ? "مطابق" : "غير مطابق", result.invoice.categoryIssue || result.issue])]); XLSX.utils.book_append_sheet(workbook, sheet, "مطابقة فيزا"); XLSX.writeFile(workbook, "مطابقة_الفيزا_مع_سوني.xlsx"); };
+  const exportStageC = () => {
+    const workbook = XLSX.utils.book_new();
+    const sheet = XLSX.utils.aoa_to_sheet([
+      ["نوع السجل", "اسم الزبون / بيان سوني", "رقم الفيزا", "مبلغ الفاتورة", "تفويض سوني", "بيان سوني", "مبلغ سوني", "الحالة", "ملاحظة"],
+      ...results.map(result => [
+        result.kind === "invoice" ? "فاتورة فيزا" : "حركة سوني زائدة",
+        result.kind === "invoice" ? result.invoice.name : result.sonyName,
+        result.sonyVisa || stageAVisaNumber(result.invoice.originalName),
+        result.kind === "invoice" ? result.invoice.amount : "",
+        result.authNumber,
+        result.sonyName,
+        result.sonyAmount || "",
+        result.kind === "sony-only" ? "حركة سوني بلا فاتورة" : result.matched ? "مطابق" : "فاتورة بلا حركة سوني مطابقة",
+        result.invoice.categoryIssue || result.issue
+      ])
+    ]);
+    sheet["!cols"] = [18, 32, 14, 16, 18, 32, 16, 30, 46].map(wch => ({ wch }));
+    sheet["!autofilter"] = { ref: sheet["!ref"] || "A1:I1" };
+    sheet["!rows"] = [{ hpt: 26 }];
+    XLSX.utils.book_append_sheet(workbook, sheet, "مطابقة فيزا");
+    XLSX.writeFile(workbook, "مطابقة_الفيزا_مع_سوني.xlsx");
+  };
   return <div dir="rtl" className="min-h-screen bg-slate-50 p-6 text-slate-900"><div className="mx-auto max-w-6xl space-y-5">
     <div className="flex flex-wrap items-center justify-between gap-3">
       <button onClick={onBack} className="flex items-center gap-1 text-sm text-slate-500 hover:text-blue-600"><ChevronLeft className="h-4 w-4" />العودة لمنصة الفيزا</button>
@@ -1150,18 +2074,28 @@ function StageCPlatform({ invoices, onBack, onTransferToD, onSafeActivities }: {
       <div className="flex gap-2">
         <button onClick={runStageC} className="rounded-lg bg-amber-600 px-4 py-2 text-sm font-medium text-white"><Sparkles className="mr-1 inline h-4 w-4" />تشغيل المطابقة</button>
         {results.length > 0 && <button onClick={exportStageC} className="rounded-lg bg-green-600 px-4 py-2 text-sm font-medium text-white"><Download className="mr-1 inline h-4 w-4" />تصدير مطابقة فيزا</button>}
-        {results.some(result => result.matched) && <button onClick={() => {
+        {results.length > 0 && <button onClick={() => {
           const confirmed = results.filter(result => result.matched);
           onSafeActivities?.(confirmed.map(result => `${result.invoice.name} ↔ ${result.sonyName} · ${fmtNum(result.invoice.amount)} ₪`));
-          onTransferToD?.(results, []);
+          onTransferToD?.(results, pendingBankInputs);
         }} className="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white">ترحيل إلى D</button>}
       </div>
     </div>
-    <div className="rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">تم ترحيل {invoices.length} فاتورة فيزا من A. تتم المطابقة برقم الفيزا والمبلغ، ويُحفظ رقم التفويض من سوني كاشير.</div>
+    <div className="rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">{invoices.length ? `تم ترحيل ${invoices.length} فاتورة فيزا من A.` : `${effectiveInvoices.length} فاتورة فيزا جاهزة من الملف المرفوع مباشرة.`} تتم المطابقة برقم الفيزا المكوّن من 4 أرقام والمبلغ، ويُحفظ رقم التفويض من صف سوني نفسه.</div>
     {error && <div className="rounded-lg bg-red-100 p-3 text-sm text-red-800">{error}</div>}
+    {!invoices.length && <div className="rounded-xl border border-slate-200 bg-white p-4">
+      <h2 className="mb-3 text-sm font-bold">ملف فواتير الفيزا (إذا لم تُرحّل من A)</h2>
+      <DropZone file={invoiceFile} onFile={loadInvoiceFile} onClear={() => { setInvoiceFile(null); setInvoiceFileName(""); setInvoiceHeaders([]); setInvoiceRows([]); }} />
+      {!invoiceFile && invoiceFileName && <p className="mt-2 text-xs text-emerald-700">تم استعادة بيانات الملف المحفوظ: {invoiceFileName}</p>}
+      {!!invoiceHeaders.length && <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
+        <Sel label="اسم الزبون مع رقم الفيزا" headers={invoiceHeaders} value={invoiceMap.name} onChange={value => setInvoiceMap(prev => ({ ...prev, name: value }))} />
+        <Sel label="مبلغ الفاتورة" headers={invoiceHeaders} value={invoiceMap.amount} onChange={value => setInvoiceMap(prev => ({ ...prev, amount: value }))} />
+      </div>}
+    </div>}
     <div className="rounded-xl border border-slate-200 bg-white p-4">
       <h2 className="mb-3 text-sm font-bold">ملف سوني كاشير فيزا</h2>
-      <DropZone file={file} onFile={loadSonyFile} onClear={() => { setFile(null); setHeaders([]); setRows([]); }} />
+      <DropZone file={file} onFile={loadSonyFile} onClear={() => { setFile(null); setSonyFileName(""); setHeaders([]); setRows([]); }} />
+      {!file && sonyFileName && <p className="mt-2 text-xs text-emerald-700">تم استعادة بيانات الملف المحفوظ: {sonyFileName}</p>}
       {!!headers.length && <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-3">
         <Sel label="البيان الذي يحتوي رقم الفيزا" headers={headers} value={map.name} onChange={value => setMap(prev => ({ ...prev, name: value }))} />
         <Sel label="المبلغ" headers={headers} value={map.amount} onChange={value => setMap(prev => ({ ...prev, amount: value }))} />
@@ -1169,34 +2103,54 @@ function StageCPlatform({ invoices, onBack, onTransferToD, onSafeActivities }: {
       </div>}
     </div>
     {!!results.length && <div className="overflow-hidden rounded-xl border border-slate-200 bg-white">
-      <div className="border-b bg-slate-50 px-4 py-3 text-sm font-bold">مطابق: {results.filter(result => result.matched).length} · غير مطابق: {results.filter(result => !result.matched).length}</div>
-      <div className="overflow-x-auto"><table className="w-full text-sm"><thead className="bg-slate-100 text-xs"><tr><th className="p-3 text-right">اسم الزبون</th><th className="p-3 text-right">رقم الفيزا</th><th className="p-3 text-right">المبلغ</th><th className="p-3 text-right">رقم التفويض</th><th className="p-3 text-right">بيان سوني</th><th className="p-3 text-right">الحالة</th></tr></thead><tbody>
-        {pagedResults.map(result => <tr key={`${result.invoice.source}-${result.invoice.id}`} className="border-t"><td className="p-3">{result.invoice.name}</td><td className="p-3 font-mono">{result.sonyVisa || "—"}</td><td className="p-3 font-mono">{fmtNum(result.invoice.amount)}</td><td className="p-3 font-mono">{result.authNumber || "—"}</td><td className="p-3">{result.sonyName || "—"}</td><td className={`p-3 font-semibold ${result.matched ? "text-green-700" : "text-red-700"}`}>{result.matched ? result.issue || "مطابق" : "غير مطابق"}</td></tr>)}
+      <div className="border-b bg-slate-50 px-4 py-3 text-sm font-bold">
+        فواتير مطابقة: {results.filter(result => result.kind === "invoice" && result.matched).length}
+        {" · "}فواتير بلا مطابقة: {results.filter(result => result.kind === "invoice" && !result.matched).length}
+        {" · "}حركات سوني زائدة: {results.filter(result => result.kind === "sony-only").length}
+      </div>
+      <div className="overflow-x-auto"><table className="w-full text-sm"><thead className="bg-slate-100 text-xs"><tr><th className="p-3 text-right">نوع السجل</th><th className="p-3 text-right">اسم الزبون / بيان سوني</th><th className="p-3 text-right">رقم الفيزا</th><th className="p-3 text-right">مبلغ الفاتورة</th><th className="p-3 text-right">مبلغ سوني</th><th className="p-3 text-right">رقم التفويض</th><th className="p-3 text-right">بيان سوني</th><th className="p-3 text-right">الحالة</th></tr></thead><tbody>
+        {pagedResults.map(result => <tr key={`${result.kind}-${result.invoice.source}-${result.invoice.id}`} className="border-t">
+          <td className="p-3">{result.kind === "invoice" ? "فاتورة فيزا" : "حركة سوني زائدة"}</td>
+          <td className="p-3">{result.kind === "invoice" ? result.invoice.name : result.sonyName}</td>
+          <td className="p-3 font-mono">{result.sonyVisa || stageAVisaNumber(result.invoice.originalName) || "—"}</td>
+          <td className="p-3 font-mono">{result.kind === "invoice" ? fmtNum(result.invoice.amount) : "—"}</td>
+          <td className="p-3 font-mono">{result.sonyName ? fmtNum(result.sonyAmount) : "—"}</td>
+          <td className="p-3 font-mono">{result.authNumber || "—"}</td>
+          <td className="p-3">{result.sonyName || "—"}</td>
+          <td className={`p-3 font-semibold ${result.matched ? "text-green-700" : "text-red-700"}`}>
+            {result.kind === "sony-only" ? "حركة سوني بلا فاتورة مطابقة" : result.matched ? result.issue || "مطابق" : "فاتورة بلا حركة سوني مطابقة"}
+          </td>
+        </tr>)}
       </tbody></table></div>
+      {totalPages > 1 && <div className="flex items-center justify-center gap-3 border-t p-3 text-xs">
+        <button type="button" onClick={() => setPage(current => Math.max(1, current - 1))} disabled={currentPage <= 1} className="rounded border px-3 py-1.5 disabled:opacity-40">السابق</button>
+        <span>صفحة {currentPage} من {totalPages}</span>
+        <button type="button" onClick={() => setPage(current => Math.min(totalPages, current + 1))} disabled={currentPage >= totalPages} className="rounded border px-3 py-1.5 disabled:opacity-40">التالي</button>
+      </div>}
     </div>}
   </div></div>;
 }
 
-function EmptyStageB({ onBack }: { onBack: () => void }) {
-  return <div dir="rtl" className="min-h-screen bg-slate-50 p-6 text-slate-900">
-    <div className="mx-auto flex min-h-[70vh] max-w-6xl items-center justify-center rounded-2xl border border-dashed border-slate-300 bg-white">
-      <div className="text-center">
-        <div className="text-lg font-bold text-slate-700">منصة B</div>
-        <p className="mt-2 text-sm text-slate-500">هذه المنصة فارغة حاليًا.</p>
-        <button onClick={onBack} className="mt-4 rounded-lg bg-blue-600 px-4 py-2 text-sm text-white hover:bg-blue-700">العودة</button>
-      </div>
-    </div>
-  </div>;
-}
-
 // ─── Main Component ───────────────────────────────────────────────────────────
-export default function Reconciliation2({ onBack, onStageAToMain, onStageBToMain, onSafeActivities, visaInvoices = [], initialStage = "hub" }: { onBack: () => void; onStageAToMain?: (results: StageAResult[]) => void; onStageBToMain?: () => void; onSafeActivities?: (activities: string[]) => void; visaInvoices?: StageAResult[]; initialStage?: "hub" | "stageA" | "stageB" | "stageC" | "stageD" | "stageF" }) {
+export default function Reconciliation2({ onBack, onStageAToMain, onStageBToMain, onSafeActivities, onOpenInvoiceReference, visaInvoices = [], initialStageDBankInputs = [], initialStage = "hub" }: { onBack: () => void; onStageAToMain?: (results: StageAResult[], summary?: StageASummary) => void; onStageBToMain?: () => void; onSafeActivities?: (activities: string[]) => void; onOpenInvoiceReference?: (invoice: StageAResult) => boolean; visaInvoices?: StageAResult[]; initialStageDBankInputs?: StageDBankInput[]; initialStage?: "hub" | "stageA" | "stageB" | "stageC" | "stageD" | "stageF" }) {
   const [stagePage, setStagePage] = useState<"hub" | "stageA" | "stageB" | "stageC" | "stageD" | "stageF">(initialStage);
   const [stageDMatches, setStageDMatches] = useState<StageCMatch[]>([]);
-  const [stageDPending, setStageDPending] = useState<StageDPending[]>([]);
+  const [stageDPending, setStageDPending] = useState<StageDBankInput[]>(initialStageDBankInputs);
   const [stageBInvoices, setStageBInvoices] = useState<StageAResult[]>([]);
   const [stageCInvoices, setStageCInvoices] = useState<StageAResult[]>(visaInvoices);
+  const stageCSessionLoaded = useRef(false);
   const [sessionLoaded, setSessionLoaded] = useState(false);
+
+  useEffect(() => {
+    storageGet<StageAResult[]>("stage_c_invoices", []).then(saved => {
+      if (visaInvoices.length) void storageSet("stage_c_invoices", visaInvoices);
+      else if (saved.length) setStageCInvoices(saved);
+      stageCSessionLoaded.current = true;
+    });
+  }, []);
+  useEffect(() => {
+    if (stageCSessionLoaded.current) void storageSet("stage_c_invoices", stageCInvoices);
+  }, [stageCInvoices]);
 
   // ─── File states ──────────────────────────────────────────────────────────
   // 1. كشف البنك (يُفرز منه مشتريات عمولة تجار تلقائياً لخانة "فيزا بنك")
@@ -1340,9 +2294,7 @@ export default function Reconciliation2({ onBack, onStageAToMain, onStageBToMain
 
   // ─── Parse bank rows + auto-separate مشتريات عمولة تجار ─────────────────────
   const isVisaBankDesc = useCallback((desc: string): boolean => {
-    const visaBankKeywords = ["مشتريات عمولة تجار", "مشتريات تجار", "عمولة تجار", "مشتريات عمولة"];
-    const d = desc.toLowerCase();
-    return visaBankKeywords.some(kw => d.includes(kw.toLowerCase()));
+    return isMerchantPurchaseBankDescription(desc);
   }, []);
 
   const parsedBank = useMemo((): BankRow2[] => {
@@ -1616,12 +2568,14 @@ export default function Reconciliation2({ onBack, onStageAToMain, onStageBToMain
   // ─── نقل مشتريات عمولة تجار للمعلقة (للمطابقة ثاني يوم) ──────────────────────
   const handleMoveVisaBankToPending = () => {
     if (!visaBankRows.length) return;
-    if (!window.confirm(`نقل ${visaBankRows.length} حوالة "مشتريات عمولة تجار" للمعلقة؟\nستطابقها ثاني يوم مع سوني كاشير فيزا.`)) return;
-    const items: PendingVisaBank[] = visaBankRows.map(b => ({
+    const newRows = visaBankRows.filter(bank => !pendingVisaBank.some(item => item.bankId === bank.id));
+    if (!newRows.length) return;
+    if (!window.confirm(`نقل ${newRows.length} حوالة "مشتريات عمولة تجار" للمعلقة؟\nستطابقها لاحقاً مع تفويض سوني كاشير.`)) return;
+    const items: PendingVisaBank[] = newRows.map(b => ({
       id: `pb-${Date.now()}-${b.id}`,
       bankId: b.id,
       bankDesc: b.description,
-      authNumber: null,
+      authNumber: extractMerchantAuthorizationNumber(b.description) || null,
       amount: b.rawAmount,
       date: b.date,
       movedAt: new Date().toLocaleString("ar-SA"),
@@ -1631,7 +2585,7 @@ export default function Reconciliation2({ onBack, onStageAToMain, onStageBToMain
 
   // ─── مطابقة المعلقة مع سوني مؤكد ─────────────────────────────────────────────
   // ثاني يوم: نطابق pendingVisaBank (مشتريات البنك) مع matchedVisa (سوني مؤكد)
-  // عبر رقم التفويض إن وجد، أو بالاسم + المبلغ
+  // عبر رقم التفويض الموجود في وصف مشتريات التجار
   const pendingMatchResults = useMemo(() => {
     if (!pendingVisaBank.length || !matchedVisa.length) return [];
     const results: Array<{ pending: PendingVisaBank; matched: MatchedVisa; score: number; reason: string }> = [];
@@ -1641,18 +2595,10 @@ export default function Reconciliation2({ onBack, onStageAToMain, onStageBToMain
       let best: { matched: MatchedVisa; score: number; reason: string } | null = null;
       matchedVisa.forEach(m => {
         if (usedMatched.has(m.id)) return;
-        // مطابقة برقم التفويض إن وجد
-        if (m.authNumber && p.authNumber && m.authNumber === p.authNumber) {
-          if (!best || 1 > best.score) best = { matched: m, score: 1, reason: "رقم تفويض مطابق" };
-          return;
-        }
-        // مطابقة بالاسم + المبلغ
-        const amtMatch = Math.abs(p.amount - m.amount) <= 0.01;
-        const ms = advancedMatchCheck(m.sonyName, p.bankDesc);
-        if (ms.isMatch && amtMatch) {
-          if (!best || 0.9 > best.score) best = { matched: m, score: 0.9, reason: "اسم ومبلغ متطابقان" };
-        } else if (amtMatch) {
-          if (!best || 0.3 > best.score) best = { matched: m, score: 0.3, reason: "مبلغ متطابق فقط" };
+        if (m.authNumber && p.authNumber &&
+            normalizeAuthorizationNumber(m.authNumber) === normalizeAuthorizationNumber(p.authNumber) &&
+            (!best || 1 > best.score)) {
+          best = { matched: m, score: 1, reason: "رقم التفويض مطابق" };
         }
       });
       const selected = best as { matched: MatchedVisa; score: number; reason: string } | null;
@@ -1853,16 +2799,20 @@ export default function Reconciliation2({ onBack, onStageAToMain, onStageBToMain
   const canExport = parsedBank.length > 0 || parsedAza.length > 0 || parsedSony.length > 0;
 
   if (stagePage === "stageA") {
-    return <StageAPlatform onBack={() => setStagePage("hub")} onSafeActivities={onSafeActivities} onTransferToB={results => {
+    return <StageAPlatform onBack={() => setStagePage("hub")} onSafeActivities={onSafeActivities} onTransferToB={(results, summary) => {
       onSafeActivities?.(results.filter(result => result.matched && result.issue !== "تم اعتمادها يدوياً").map(result => `${result.originalName} ↔ ${result.databaseName} · ${fmtNum(result.amount)} ₪`));
-      if (onStageAToMain) onStageAToMain(results); else { setStageBInvoices(results); setStagePage("stageB"); }
-    }} onTransferVisaToC={results => { setStageCInvoices(results.filter(result => result.category === "فيزا")); setStagePage("stageC"); }} />;
+      if (onStageAToMain) onStageAToMain(results, summary); else { setStageBInvoices(results); setStagePage("stageB"); }
+    }} onTransferVisaToC={results => { setStageCInvoices(results); setStagePage("stageC"); }} />;
   }
   if (stagePage === "stageB") {
-    return <EmptyStageB onBack={() => setStagePage("hub")} />;
+    return <StageBPlatform invoices={stageBInvoices} onBack={() => setStagePage("hub")} onSafeActivities={onSafeActivities} onOpenInvoiceReference={onOpenInvoiceReference} onTransferVisaToC={results => { setStageCInvoices(results); setStagePage("stageC"); }} />;
   }
   if (stagePage === "stageC") {
-    return <StageCPlatform invoices={stageCInvoices} onBack={() => setStagePage("hub")} onSafeActivities={onSafeActivities} onTransferToD={(matches, pending) => { setStageDMatches(matches); setStageDPending(pending); setStagePage("stageD"); }} />;
+    const stageDBankInputs = [
+      ...initialStageDBankInputs,
+      ...pendingVisaBank.map(item => ({ id: item.id, description: item.bankDesc, amount: item.amount, date: item.date }))
+    ];
+    return <StageCPlatform invoices={stageCInvoices} pendingBankInputs={stageDBankInputs} onBack={() => setStagePage("hub")} onSafeActivities={onSafeActivities} onTransferToD={(matches, pending) => { setStageDMatches(matches); setStageDPending(pending); setStagePage("stageD"); }} />;
   }
   if (stagePage === "stageD") {
     return <StageDPlatform matches={stageDMatches} pending={stageDPending} onBack={() => setStagePage("stageC")} />;
@@ -1886,9 +2836,6 @@ export default function Reconciliation2({ onBack, onStageAToMain, onStageBToMain
           <div className="mx-auto mb-4 flex h-16 w-16 items-center justify-center overflow-hidden rounded-2xl bg-white ring-4 ring-amber-100 shadow-lg">
             <img src="/taswiyah-logo.png" alt="Taswiyah Hub" className="h-full w-full object-contain p-1" />
           </div>
-          <button onClick={onBack} className="absolute right-5 top-5 flex items-center gap-1.5 text-sm text-slate-500 transition-colors hover:text-indigo-600">
-              <ChevronLeft className="w-4 h-4"/>المنصة الأولى
-          </button>
            <div className="mb-1 text-xs font-bold tracking-[.18em] text-amber-600">TASWIYAH HUB</div>
            <h1 className="text-3xl font-black tracking-tight text-slate-900">محطتك الأولى لتسوية الحسابات بدقة.</h1>
            <p className="mx-auto mt-2 max-w-2xl text-sm text-slate-500">اختر المرحلة المناسبة لمعالجة الفواتير والحوالات والفيزا</p>
@@ -1919,7 +2866,7 @@ export default function Reconciliation2({ onBack, onStageAToMain, onStageBToMain
             { id: "stage-d", code: "D", title: "مطابقة الفيزا — المرحلة الثانية", description: "مطابقة أرقام الفيزا المؤكدة مع الحوالات البنكية المعلقة.", color: "bg-indigo-600", text: "text-indigo-600" },
             { id: "stage-f", code: "F", title: "تحويل إيصال SoftPOS إلى Excel", description: "لصق نص الإيصال وتحويل الحركات وأرقام البطاقات والتفويض إلى ملف سوني جاهز.", color: "bg-slate-700", text: "text-slate-700" },
           ].map(stage => (
-            <button key={stage.id} onClick={() => stage.id === "stage-a" ? setStagePage("stageA") : stage.id === "stage-b" ? (onStageBToMain ? onStageBToMain() : setStagePage("stageB")) : stage.id === "stage-c" ? setStagePage("stageC") : stage.id === "stage-d" ? setStagePage("stageD") : setStagePage("stageF")}
+            <button key={stage.id} onClick={() => stage.id === "stage-a" ? setStagePage("stageA") : stage.id === "stage-b" ? (onStageBToMain ? onStageBToMain() : onBack()) : stage.id === "stage-c" ? setStagePage("stageC") : stage.id === "stage-d" ? setStagePage("stageD") : setStagePage("stageF")}
               className="group flex min-h-36 items-center gap-5 rounded-2xl border border-slate-200 bg-white p-5 text-right shadow-sm transition-all hover:-translate-y-0.5 hover:border-slate-300 hover:shadow-md">
               <span className={`flex h-14 w-14 shrink-0 items-center justify-center rounded-xl ${stage.color} text-xl font-black text-white shadow-sm`}>{stage.code}</span>
               <span className="min-w-0 flex-1">
@@ -2001,6 +2948,14 @@ export default function Reconciliation2({ onBack, onStageAToMain, onStageBToMain
 
               {/* Visa Bank tab */}
               {tab === "bank" && (
+                <>
+                <div className="flex flex-wrap items-center justify-between gap-2 border-b bg-amber-50/70 px-4 py-3">
+                  <p className="text-xs text-amber-900">مشتريات عمولة تجار تُستبعد من المطابقة العادية ويمكن ترحيلها للمعلّقات حتى مطابقتها لاحقاً مع تفويض سوني.</p>
+                  <button type="button" onClick={handleMoveVisaBankToPending} disabled={!visaBankRows.some(bank => !pendingVisaBank.some(item => item.bankId === bank.id))}
+                    className="rounded-lg bg-amber-600 px-3 py-2 text-xs font-medium text-white disabled:opacity-40">
+                    نقل مشتريات التجار للمعلّقات ({visaBankRows.filter(bank => !pendingVisaBank.some(item => item.bankId === bank.id)).length})
+                  </button>
+                </div>
                 <table className="w-full text-sm">
                   <thead><tr className="bg-muted text-xs">
                     <th className="px-3 py-2.5 text-right">البيان</th>
@@ -2020,6 +2975,7 @@ export default function Reconciliation2({ onBack, onStageAToMain, onStageBToMain
                     {!visaBankRows.length && <tr><td colSpan={4} className="py-10 text-center text-muted-foreground text-xs">لا توجد حوالات "مشتريات عمولة تجار". ارفع كشف البنك أولاً.</td></tr>}
                   </tbody>
                 </table>
+                </>
               )}
 
               {/* Aza tab */}
@@ -2206,8 +3162,12 @@ export default function Reconciliation2({ onBack, onStageAToMain, onStageBToMain
                 <div>
                   <div className="px-4 py-3 bg-amber-50/60 border-b border-amber-100">
                     <p className="text-xs text-amber-800">
-                      هذه الحوالات "مشتريات عمولة تجار" من كشف البنك — تنتظر ثاني يوم للمطابقة مع سوني كاشير فيزا المؤكد.
+                      هذه الحركات «مشتريات عمولة تجار» محفوظة للمراجعة لاحقاً. رقم التفويض هو الجزء الأوسط من البيان البنكي، ويُطابق مع رقم التفويض في صف سوني.
                     </p>
+                    {!!pendingVisaBank.length && <button type="button" onClick={() => setStagePage("stageC")}
+                      className="mt-2 rounded-lg bg-indigo-600 px-3 py-2 text-xs font-medium text-white hover:bg-indigo-700">
+                      مطابقة هذه المعلّقات عبر C ثم D ({pendingVisaBank.length})
+                    </button>}
                     {pendingMatchResults.length > 0 && (
                       <p className="text-xs text-green-700 mt-1">{pendingMatchResults.length} مطابقة محتملة مع سوني مؤكد!</p>
                     )}
@@ -2215,6 +3175,7 @@ export default function Reconciliation2({ onBack, onStageAToMain, onStageBToMain
                   <table className="w-full text-sm">
                     <thead><tr className="bg-muted text-xs">
                       <th className="px-3 py-2.5 text-right">بيان البنك</th>
+                      <th className="px-3 py-2.5 text-right">رقم التفويض</th>
                       <th className="px-3 py-2.5 text-right">المبلغ</th>
                       <th className="px-3 py-2.5 text-right">التاريخ</th>
                       <th className="px-3 py-2.5 text-right">مطابقة محتملة</th>
@@ -2226,6 +3187,7 @@ export default function Reconciliation2({ onBack, onStageAToMain, onStageBToMain
                         return (
                           <tr key={p.id} className="border-t hover:bg-muted/20 transition-colors">
                             <td className="px-3 py-2.5 font-medium text-teal-700">{p.bankDesc}</td>
+                            <td className="px-3 py-2.5 font-mono">{p.authNumber || "—"}</td>
                             <td className="px-3 py-2.5 font-mono font-bold text-amber-700">{fmtNum(p.amount)}</td>
                             <td className="px-3 py-2.5 text-xs text-muted-foreground">{p.date}</td>
                             <td className="px-3 py-2.5 text-xs">
@@ -2246,7 +3208,7 @@ export default function Reconciliation2({ onBack, onStageAToMain, onStageBToMain
                           </tr>
                         );
                       })}
-                      {!pendingVisaBank.length && <tr><td colSpan={5} className="py-10 text-center text-muted-foreground text-xs">لا توجد حوالات معلقة. فرز كشف البنك وانقل "مشتريات تجار" للمعلقة.</td></tr>}
+                      {!pendingVisaBank.length && <tr><td colSpan={6} className="py-10 text-center text-muted-foreground text-xs">لا توجد حوالات معلقة. فرز كشف البنك وانقل «مشتريات عمولة تجار» للمعلّقات.</td></tr>}
                     </tbody>
                   </table>
                 </div>
