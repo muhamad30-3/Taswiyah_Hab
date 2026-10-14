@@ -1040,6 +1040,14 @@ function reconcile(
   const savedKeys = new Set(uniqueSavedMatches.map(({ cashierRow, bankRow }) => `${cashierKey(cashierRow)}-${bankKey(bankRow)}`));
   const savedCashierIds = new Set(uniqueSavedMatches.map(({ cashierRow }) => cashierKey(cashierRow)));
   const savedBankIds = new Set(uniqueSavedMatches.map(({ bankRow }) => bankKey(bankRow)));
+  savedMatches.forEach(match => {
+    const cashierRow = resolveSavedCashierRow(match, cashier);
+    const bankRow = resolveSavedBankRow(match, bank);
+    if (cashierRow) savedCashierIds.add(cashierKey(cashierRow));
+    if (bankRow) savedBankIds.add(bankKey(bankRow));
+  });
+  savedCashierIds.forEach(key => usedCashier.add(key));
+  savedBankIds.forEach(key => usedBank.add(key));
 
   uniqueSavedMatches.forEach(({ match, bankRow, cashierRow }) => {
     results.push({ type: "saved", bank: bankRow, cashier: cashierRow, savedMatch: match });
@@ -2059,7 +2067,7 @@ function DropZone({ file, fileCount = 1, onFiles, onClear, headers = [], rows = 
     <div className="flex items-center justify-between gap-3 p-3.5 bg-blue-500/5 border border-blue-500/25 rounded-lg">
       <div className="flex items-center gap-2.5">
         <FileSpreadsheet className="w-4 h-4 text-blue-600 shrink-0"/>
-        <div><div className="text-sm font-medium">{fileCount > 1 ? `${fileCount} ملفات مدمجة` : file.name}</div><div className="text-xs text-muted-foreground">{fileCount > 1 ? `${rows.length} صفاً إجمالياً · ${file.name}` : `${(file.size/1024).toFixed(1)} KB`}</div></div>
+        <div><div className="text-sm font-medium">{fileCount > 1 ? `${fileCount} ملفات مدمجة` : file.name}</div><div className="text-xs text-muted-foreground">{rows.length.toLocaleString("ar")} صفاً إجمالياً · ${(file.size/1024).toFixed(1)} KB</div></div>
       </div>
       {headers.length > 0 && rows.length > 0 && <button onClick={() => downloadCleanedSheet(file.name, headers, rows)} className="flex items-center gap-1 rounded-md bg-emerald-50 px-2 py-1.5 text-xs font-medium text-emerald-700 hover:bg-emerald-100"><Download className="h-3.5 w-3.5"/>تنزيل Excel</button>}
       <label className="cursor-pointer rounded-md border px-2 py-1.5 text-xs hover:bg-muted">إضافة ملفات للدمج
@@ -2771,7 +2779,7 @@ interface SavedProject {
   stageAInvoices?: StageAResult[];
   stageADatabaseSummary?: StageASummary;
   stageASession?: Record<string, unknown> | null;
-  stageASourceFiles?: Array<{ id: string; fileName: string }>;
+  stageASourceFiles?: Array<{ id: string; stage: "stageA" | "stageB" | "stageC"; source: string; fileName: string; mimeType: string }>;
   walletBankHeaders?: string[];
   walletBankRows?: Record<string, unknown>[];
   walletBankMap?: { date: string; desc: string; debit: string; credit: string; ref: string };
@@ -3694,6 +3702,7 @@ export default function App({ initialPage = "recon2", onSafeActivities }: { init
   const [sessionLoaded, setSessionLoaded] = useState(false);
   const [showDeleteMenu, setShowDeleteMenu] = useState(false);
   const [sessionRestoredNotice, setSessionRestoredNotice] = useState(false);
+  const [activeProjectSourceFiles, setActiveProjectSourceFiles] = useState<NonNullable<SavedProject["stageASourceFiles"]>>([]);
 
   const [bankFile, setBankFile]   = useState<File|null>(null);
   const [bankFileCount, setBankFileCount] = useState(0);
@@ -4491,10 +4500,31 @@ export default function App({ initialPage = "recon2", onSafeActivities }: { init
   ), [activeCashier, mahmoudWalletSelectedIds]);
   const specialCashierIds = useMemo(() => new Set([...jawwalPayCashierIds, ...mahmoudWalletCashierIds]), [jawwalPayCashierIds, mahmoudWalletCashierIds]);
 
-  const savedRows = useMemo(
-    () => (results?.filter(r => r.type === "saved") as any[] ?? []).sort((a,b) => b.bank.rawAmount - a.bank.rawAmount),
-    [results]
-  );
+  const savedRows = useMemo(() => {
+    const savedCashierCandidates = uniqueTransactionRows([
+      ...reconciliationCashierRows,
+      ...activeCashier,
+      ...cashierSourceRows,
+      ...heldItems.filter(item => item.kind === "cashier").map(item => item.data as CashierRow),
+      ...returnedHeldCashier,
+    ]);
+    const savedBankCandidates = uniqueTransactionRows([
+      ...reconciliationBankRows,
+      ...activeBank,
+      ...bankSourceRows,
+      ...heldItems.filter(item => item.kind === "bank").map(item => item.data as BankRow),
+      ...returnedHeldBank,
+    ]);
+    return savedMatches.flatMap(savedMatch => {
+      const cashier = resolveSavedCashierRow(savedMatch, savedCashierCandidates);
+      const bank = resolveSavedBankRow(savedMatch, savedBankCandidates);
+      if (!cashier || !bank) return [];
+      return [{ type: "saved" as const, cashier, bank, savedMatch }];
+    }).sort((a, b) => b.bank.rawAmount - a.bank.rawAmount);
+  }, [
+    savedMatches, reconciliationCashierRows, activeCashier, cashierSourceRows, heldItems, returnedHeldCashier,
+    reconciliationBankRows, activeBank, bankSourceRows, returnedHeldBank,
+  ]);
   const pendingRows = useMemo(
     () => (results?.filter(r => r.type === "pending") as any[] ?? []).sort((a,b) =>
       Number(b.matchType === "phone") - Number(a.matchType === "phone") ||
@@ -5908,14 +5938,14 @@ export default function App({ initialPage = "recon2", onSafeActivities }: { init
         sourceFilesReadFailed = true;
       }
     }
-    const uploadedSourceFiles: Array<{ id: string; fileName: string }> = [];
+    const uploadedSourceFiles: NonNullable<SavedProject["stageASourceFiles"]> = [];
     const uploadFailures: string[] = sourceFilesReadFailed ? ["تعذر قراءة الملفات المؤقتة"] : [];
     for (const group of stageASourceFiles) {
       for (const file of group.files) {
-        const fileName = `${name} - ${file.name}`;
+        const fileName = `${file.name}`;
         try {
           const id = await uploadStoredFile(file, fileName);
-          uploadedSourceFiles.push({ id, fileName });
+          uploadedSourceFiles.push({ id, stage: group.stage, source: group.source, fileName, mimeType: file.type || "application/octet-stream" });
         } catch (cause) {
           console.error(`تعذر حفظ ملف المشروع «${file.name}» في مكتبة الملفات:`, cause);
           uploadFailures.push(file.name);
@@ -5949,6 +5979,7 @@ export default function App({ initialPage = "recon2", onSafeActivities }: { init
       visaItems, heldItems, returnedHeldBank, returnedHeldCashier
     };
     await persistProjectsList([...projects, project]);
+    setActiveProjectSourceFiles(uploadedSourceFiles);
     setToast(uploadFailures.length
       ? `تم حفظ المشروع، لكن تعذر رفع ${uploadFailures.length} ملف${uploadFailures.length === 1 ? "" : "ات"} إلى ملفاتي.`
       : `تم حفظ المشروع "${name}"${uploadedSourceFiles.length ? ` وحفظ ${uploadedSourceFiles.length} ملفاً في ملفاتي` : ""} ✓`);
@@ -5956,6 +5987,7 @@ export default function App({ initialPage = "recon2", onSafeActivities }: { init
 
   const loadProject = (p: SavedProject) => {
     clearMatchUndo();
+    setActiveProjectSourceFiles(p.stageASourceFiles ?? []);
     setBankH(p.bankHeaders); setBankRows(p.bankRowsRaw); setBankMap({ date: p.bankMap?.date ?? "", desc: p.bankMap?.desc ?? "", debit: p.bankMap?.debit ?? "", credit: p.bankMap?.credit ?? "", accountType: p.bankMap?.accountType ?? "", ref: (p.bankMap as any)?.ref ?? "" }); setBankSwap(p.bankSwap ?? false);
     setBankFileSessionId(p.bankFileSessionId ?? 0);
     setCashH(p.cashHeaders); setCashRows(p.cashRowsRaw); setCashMap({ date: p.cashMap?.date ?? "", name: p.cashMap?.name ?? "", debit: p.cashMap?.debit ?? "", credit: p.cashMap?.credit ?? "", accountType: p.cashMap?.accountType ?? "", ref: p.cashMap?.ref ?? "", userId: p.cashMap?.userId ?? "" }); setCashSwap(p.cashSwap ?? false);
@@ -6370,7 +6402,7 @@ export default function App({ initialPage = "recon2", onSafeActivities }: { init
   }
 
   if (page === "recon2") {
-    return <Suspense fallback={<PlatformLoading />}><Reconciliation2 onSafeActivities={onSafeActivities} onOpenInvoiceReference={handleOpenStageAInvoiceReference} onBack={() => setPage("main")} onStageBToMain={() => setPage("stageBChoice")} onStageAToMain={(results, summary) => {
+    return <Suspense fallback={<PlatformLoading />}><Reconciliation2 projectSourceFiles={activeProjectSourceFiles} onSafeActivities={onSafeActivities} onOpenInvoiceReference={handleOpenStageAInvoiceReference} onBack={() => setPage("main")} onStageBToMain={() => setPage("stageBChoice")} onStageAToMain={(results, summary) => {
       const transferred = results;
       setStageAInvoices(previous => {
         const transferredKeys = new Set(transferred.map(result => `${result.source}:${result.id}`));
@@ -6381,7 +6413,7 @@ export default function App({ initialPage = "recon2", onSafeActivities }: { init
     }} /></Suspense>;
   }
   if (page === "recon2StageA") {
-    return <Suspense fallback={<PlatformLoading />}><Reconciliation2 initialStage="stageA" onSafeActivities={onSafeActivities} onOpenInvoiceReference={handleOpenStageAInvoiceReference} onBack={() => setPage("main")} onStageBToMain={() => setPage("stageBChoice")} onStageAToMain={(results, summary) => {
+    return <Suspense fallback={<PlatformLoading />}><Reconciliation2 projectSourceFiles={activeProjectSourceFiles} initialStage="stageA" onSafeActivities={onSafeActivities} onOpenInvoiceReference={handleOpenStageAInvoiceReference} onBack={() => setPage("main")} onStageBToMain={() => setPage("stageBChoice")} onStageAToMain={(results, summary) => {
       const transferred = results;
       setStageAInvoices(previous => {
         const transferredKeys = new Set(transferred.map(result => `${result.source}:${result.id}`));

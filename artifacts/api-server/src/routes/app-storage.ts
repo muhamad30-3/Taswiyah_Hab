@@ -537,6 +537,7 @@ router.put("/storage/:key", requireSession, async (request: AuthenticatedRequest
     response.status(413).json({ error: "حجم البيانات أكبر من الحد المسموح للتخزين." });
     return;
   }
+  const startedAt = performance.now();
   try {
     const pool = await getDataStore();
     const storedValue = serializedBytes > compressValueAboveBytes
@@ -549,10 +550,21 @@ router.put("/storage/:key", requireSession, async (request: AuthenticatedRequest
        DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`,
       [request.appUser!.id, key, storedValue],
     );
+    logger.info({ key, payloadBytes: serializedBytes, durationMs: Math.round(performance.now() - startedAt) }, "Central storage write completed");
     response.json({ saved: true });
   } catch (error) {
-    logger.error({ err: error }, "Central storage write failed");
-    response.status(503).json({ error: "تعذر حفظ البيانات في قاعدة البيانات. لم يتم تأكيد الحفظ." });
+    const code = (error as { code?: string }).code;
+    logger.error({ err: error, code, key, payloadBytes: serializedBytes, durationMs: Math.round(performance.now() - startedAt) }, "Central storage write failed");
+    const message = code === "57014"
+      ? "انتهت مهلة حفظ البيانات في قاعدة البيانات. احتُفظت النسخة المحلية؛ أعد المحاولة بعد استقرار الاتصال أو خفّض حجم الجلسة."
+      : code === "42P01"
+      ? "جدول app_data غير موجود. نفّذ pnpm --dir lib/db run push مع DATABASE_URL ثم أعد المحاولة."
+      : code === "42501"
+        ? "حساب قاعدة البيانات المستخدم من API لا يملك صلاحية الكتابة على app_data أو أن RLS يمنعها. استخدم اتصال خادم يملك الجدول أو يتجاوز RLS، ولا تفتح صلاحيات عامة."
+        : code?.startsWith("08") || ["ECONNREFUSED", "ETIMEDOUT", "ENOTFOUND", "57P01"].includes(code ?? "")
+          ? "تعذر اتصال API بقاعدة البيانات. تحقق من DATABASE_URL، وإتاحة قاعدة البيانات للشبكة، ثم أعد تشغيل API."
+          : "تعذر حفظ البيانات في قاعدة البيانات. لم يتم تأكيد الحفظ؛ راجع سجل API لمعرفة خطأ PostgreSQL.";
+    response.status(503).json({ error: message });
   }
 });
 
@@ -636,8 +648,16 @@ router.post(
     );
     response.status(201).json({ id, fileName, mimeType, size: body.length });
   } catch (error) {
-    logger.error({ err: error }, "User file upload failed");
-    response.status(503).json({ error: "تعذر حفظ الملف في قاعدة البيانات." });
+    const code = (error as { code?: string }).code;
+    logger.error({ err: error, code }, "User file upload failed");
+    const message = code === "42P01"
+      ? "جدول الملفات user_files غير موجود. نفّذ pnpm --dir lib/db run push مع DATABASE_URL ثم أعد المحاولة."
+      : code === "42501"
+        ? "حساب قاعدة البيانات لا يملك صلاحية إضافة الملفات. امنحه صلاحيات الكتابة على user_files وتجاوز سياسات RLS."
+        : code === "23503"
+          ? "تعذر ربط الملف بحساب المستخدم في قاعدة البيانات. تحقق من جدول app_users ثم أعد تسجيل الدخول."
+          : "تعذر حفظ الملف في قاعدة البيانات. راجع سجل خادم API لمعرفة خطأ PostgreSQL التفصيلي.";
+    response.status(503).json({ error: message });
   }
 });
 

@@ -4,6 +4,7 @@ import React, { useState, useCallback, useMemo, useEffect, useRef } from "react"
 import * as XLSX from "xlsx";
 import { centralStorageEnabled, centralStorageGet, centralStorageSet, isCentralAdmin } from "../lib/central-storage";
 import { clearStageASourceFiles, saveStageASourceFiles } from "../lib/stage-a-source-files";
+import { fetchStoredFile } from "../lib/central-storage";
 import { cleanStatementText, removeStatementBalances, type StatementCell } from "../lib/account-statement-processor";
 import {
   Upload, FileSpreadsheet, Download, ChevronDown, X,
@@ -323,13 +324,13 @@ interface PendingVisaBank {
 type R2Tab = "overview" | "bank" | "aza" | "sony" | "auth" | "matched" | "pendingBank" | "unmatched";
 
 // ─── DropZone ─────────────────────────────────────────────────────────────────
-function DropZone({ file, onFile, onFiles, multiple = false, onClear }: { file:File|null; onFile:(f:File)=>void; onFiles?:(files:File[])=>void; multiple?:boolean; onClear:()=>void }) {
+function DropZone({ file, onFile, onFiles, multiple = false, onClear, rowCount }: { file:File|null; onFile:(f:File)=>void; onFiles?:(files:File[])=>void; multiple?:boolean; onClear:()=>void; rowCount?:number }) {
   const handleDrop=useCallback((e:React.DragEvent)=>{e.preventDefault();const files=Array.from(e.dataTransfer.files);if(files.length){if(onFiles)onFiles(files);else onFile(files[0]);}},[onFile,onFiles]);
   if (file) return (
     <div className="flex items-center justify-between gap-3 p-3.5 bg-blue-500/5 border border-blue-500/25 rounded-lg">
       <div className="flex items-center gap-2.5">
         <FileSpreadsheet className="w-4 h-4 text-blue-600 shrink-0"/>
-        <div><div className="text-sm font-medium">{file.name}</div><div className="text-xs text-muted-foreground">{(file.size/1024).toFixed(1)} KB</div></div>
+        <div><div className="text-sm font-medium">{file.name}</div><div className="text-xs text-muted-foreground">{(file.size/1024).toFixed(1)} KB{rowCount !== undefined ? ` · ${rowCount.toLocaleString("ar")} صف` : ""}</div></div>
       </div>
       <button onClick={onClear} className="p-1 hover:bg-muted rounded transition-colors text-muted-foreground"><X className="w-4 h-4"/></button>
     </div>
@@ -501,7 +502,52 @@ function detectInvoiceFileColumns(headers: string[]) {
   };
 }
 
-function StageAPlatform({ onBack, onTransferToB, onTransferVisaToC, onSafeActivities }: { onBack: () => void; onTransferToB: (results: StageAResult[], summary: StageASummary) => void; onTransferVisaToC: (results: StageAResult[]) => void; onSafeActivities?: (activities: string[]) => void }) {
+type ProjectSourceFile = { stage: "stageA" | "stageB" | "stageC"; source: string; file: File };
+type SavedProjectSourceFile = { id: string; stage: ProjectSourceFile["stage"]; source: string; fileName: string; mimeType: string };
+
+function ProjectSourceFileLauncher({ files, onOpen }: { files: SavedProjectSourceFile[]; onOpen: (file: ProjectSourceFile) => void }) {
+  const [opening, setOpening] = useState<string | null>(null);
+  const [error, setError] = useState("");
+  if (!files.length) return null;
+  return <section className="mt-4 rounded-xl border border-indigo-200 bg-indigo-50 p-3">
+    <h3 className="text-sm font-bold text-indigo-900">ملفات المشروع في هذه المنصة</h3>
+    <div className="mt-2 flex flex-wrap gap-2">
+      {files.map(file => <button key={file.id} type="button" disabled={opening !== null} onClick={async () => {
+        setOpening(file.id);
+        setError("");
+        try {
+          const openedFile = await fetchStoredFile(file.id, file.fileName, file.mimeType);
+          onOpen({ stage: file.stage, source: file.source, file: openedFile });
+        } catch (cause) {
+          setError(cause instanceof Error ? cause.message : "تعذر فتح ملف المشروع.");
+        } finally {
+          setOpening(null);
+        }
+      }} className="rounded-lg border border-indigo-200 bg-white px-3 py-2 text-xs font-medium text-indigo-800 hover:bg-indigo-100 disabled:opacity-50">
+        {opening === file.id ? "جارٍ الفتح..." : `فتح ${file.fileName}`}
+      </button>)}
+    </div>
+    {error && <p role="alert" className="mt-2 text-xs text-red-700">{error}</p>}
+  </section>;
+}
+
+function StageTransferDialog({ dialog, onCancel, onTransferToB, onTransferToC }: { dialog: { invoices: StageAResult[]; from: "B" | "C" } | null; onCancel: () => void; onTransferToB: (invoices: StageAResult[]) => void; onTransferToC: (invoices: StageAResult[]) => void }) {
+  if (!dialog) return null;
+  const destination = dialog.from === "B" ? "C" : "B";
+  const transfer = dialog.from === "B" ? onTransferToC : onTransferToB;
+  return <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 p-3" role="dialog" aria-modal="true" aria-label="اختيار منصة الترحيل">
+    <section className="w-full max-w-md rounded-2xl bg-white p-5 shadow-2xl">
+      <h2 className="text-lg font-bold">اختيار المنصة</h2>
+      <p className="mt-2 text-sm text-slate-600">ترحيل {dialog.invoices.length} فاتورة من {dialog.from} إلى المنصة الأخرى؟</p>
+      <div className="mt-5 flex gap-2">
+        <button type="button" onClick={() => transfer(dialog.invoices)} className="flex-1 rounded-lg bg-blue-600 px-4 py-2.5 text-sm font-semibold text-white">منصة {destination}</button>
+        <button type="button" onClick={onCancel} className="rounded-lg border px-4 py-2.5 text-sm">إلغاء</button>
+      </div>
+    </section>
+  </div>;
+}
+
+function StageAPlatform({ onBack, onTransferToB, onTransferVisaToC, onSafeActivities, initialFile }: { onBack: () => void; onTransferToB: (results: StageAResult[], summary: StageASummary) => void; onTransferVisaToC: (results: StageAResult[]) => void; onSafeActivities?: (activities: string[]) => void; initialFile?: ProjectSourceFile }) {
   const [databaseFile, setDatabaseFile] = useState<File | null>(null);
   const [databaseFileName, setDatabaseFileName] = useState("");
   const [databaseHeaders, setDatabaseHeaders] = useState<string[]>([]);
@@ -541,6 +587,7 @@ function StageAPlatform({ onBack, onTransferToB, onTransferVisaToC, onSafeActivi
   const [showDeleteMenu, setShowDeleteMenu] = useState(false);
   const [showDatabaseInvoices, setShowDatabaseInvoices] = useState(false);
   const [databaseInvoicePage, setDatabaseInvoicePage] = useState(1);
+  const [transferDestinationDialog, setTransferDestinationDialog] = useState<{ label: string; results: StageAResult[] } | null>(null);
   const stageADataLoaded = useRef(false);
 
   useEffect(() => {
@@ -601,7 +648,7 @@ function StageAPlatform({ onBack, onTransferToB, onTransferVisaToC, onSafeActivi
   const loadDatabase = async (file: File) => {
     setDatabaseFile(file); setDatabaseFileName(file.name); setError(null);
     try {
-      await saveStageASourceFiles("database", [file]);
+      await saveStageASourceFiles("stageA", "database", [file]);
       const parsed = parseSheet(await readFileBuf(file));
       setDatabaseHeaders(parsed.headers); setDatabaseRows(parsed.rows);
       setDatabaseMap({
@@ -626,7 +673,7 @@ function StageAPlatform({ onBack, onTransferToB, onTransferVisaToC, onSafeActivi
     setInvoiceProcessing(previous => ({ ...previous, [source]: true }));
     setError(`جارٍ تحليل ${files.length} ملف${files.length > 1 ? "ات" : ""} واستخراج الحركات وتنظيف الأرصدة والترويسات...`);
     try {
-      await saveStageASourceFiles(source, files, append);
+      await saveStageASourceFiles("stageA", source, files, append);
       const previousHeaders = append ? invoiceHeaders[source] ?? [] : [];
       const previousRows = append ? invoiceRows[source] ?? [] : [];
       const parsed = await parseInvoiceFiles(files, previousHeaders);
@@ -702,6 +749,11 @@ function StageAPlatform({ onBack, onTransferToB, onTransferVisaToC, onSafeActivi
     XLSX.utils.book_append_sheet(workbook, worksheet, "كشف منظف");
     XLSX.writeFile(workbook, `${(invoiceFileNames[source] || source).replace(/\.[^.]+/g, "").replace(/[\\/]+/g, "-")}-منظف.xlsx`);
   };
+  useEffect(() => {
+    if (!initialFile || initialFile.stage !== "stageA") return;
+    if (initialFile.source === "database") void loadDatabase(initialFile.file);
+    else void loadInvoices(initialFile.source, [initialFile.file]);
+  }, [initialFile]);
   const restoreInvoiceSnapshot = (source: string, snapshot: StageAInvoiceFileSnapshot) => {
     setInvoiceFiles(previous => ({ ...previous, [source]: null }));
     setInvoiceFileNames(previous => ({ ...previous, [source]: snapshot.fileName }));
@@ -737,7 +789,7 @@ function StageAPlatform({ onBack, onTransferToB, onTransferVisaToC, onSafeActivi
     setSelectedResultIds(new Set());
     setError(null);
     void storageSet("stage_a_session", null);
-    void clearStageASourceFiles().catch(cause => console.error("تعذر حذف ملفات الجلسة المؤقتة للمرحلة A:", cause));
+    void clearStageASourceFiles("stageA").catch(cause => console.error("تعذر حذف ملفات الجلسة المؤقتة للمرحلة A:", cause));
   };
 
   const runStageA = () => {
@@ -941,7 +993,7 @@ function StageAPlatform({ onBack, onTransferToB, onTransferVisaToC, onSafeActivi
           {invoiceSwaps[source] ? "المستلم مدين والمدفوع دائن" : "المدفوع مدين والمستلم دائن"}
         </label>
       )}
-      <DropZone file={invoiceFiles[source] ?? null} multiple onFile={file => void loadInvoices(source, [file])} onFiles={files => void loadInvoices(source, files)} onClear={() => { setInvoiceFiles(prev => ({ ...prev, [source]: null })); setInvoiceFileNames(prev => ({ ...prev, [source]: "" })); setInvoiceFileCounts(prev => ({ ...prev, [source]: 0 })); setInvoiceHeaders(prev => ({ ...prev, [source]: [] })); setInvoiceRows(prev => ({ ...prev, [source]: [] })); }} />
+      <DropZone file={invoiceFiles[source] ?? null} multiple rowCount={invoiceRows[source]?.length ?? 0} onFile={file => void loadInvoices(source, [file])} onFiles={files => void loadInvoices(source, files)} onClear={() => { setInvoiceFiles(prev => ({ ...prev, [source]: null })); setInvoiceFileNames(prev => ({ ...prev, [source]: "" })); setInvoiceFileCounts(prev => ({ ...prev, [source]: 0 })); setInvoiceHeaders(prev => ({ ...prev, [source]: [] })); setInvoiceRows(prev => ({ ...prev, [source]: [] })); }} />
       {!!invoiceFileNames[source] && <p className="text-xs text-emerald-700">{invoiceFiles[source] ? `${invoiceFileCounts[source] || 1} ملف${(invoiceFileCounts[source] || 1) > 1 ? "ات مدمجة" : ""}: ` : "بيانات الملفات المستعادة: "}{invoiceFileNames[source]}</p>}
       {!!invoiceHeaders[source].length && <>
         <div className="flex flex-wrap items-center gap-3">
@@ -975,9 +1027,15 @@ function StageAPlatform({ onBack, onTransferToB, onTransferVisaToC, onSafeActivi
     </div>
   );
 
-  const stageATransferResults = results.filter(result => selectedResultIds.size
-    ? selectedResultIds.has(resultKey(result))
-    : result.matched);
+  const requestStageATransfer = (mode: "matched" | "matched-and-selected" | "all") => {
+    const candidates = results.filter(result => mode === "all"
+      || (mode === "matched" && result.matched)
+      || (mode === "matched-and-selected" && (result.matched || selectedResultIds.has(resultKey(result)))));
+    setTransferDestinationDialog({
+      label: mode === "all" ? "كل نتائج منصة A" : mode === "matched" ? "المطابقات" : "المطابقات والفواتير المحددة",
+      results: candidates,
+    });
+  };
   const databaseInvoiceRows = databaseSummary.databaseInvoices ?? [];
   const databaseInvoicePageSize = 50;
   const databaseInvoicePageCount = Math.max(1, Math.ceil(databaseInvoiceRows.length / databaseInvoicePageSize));
@@ -1009,7 +1067,7 @@ function StageAPlatform({ onBack, onTransferToB, onTransferVisaToC, onSafeActivi
     {error && <div className="rounded-lg bg-red-100 p-3 text-sm text-red-800">{error}</div>}{stageAFilterBar}
     <div className="space-y-3 rounded-2xl border border-blue-100 bg-white p-5 shadow-sm">
       <div className="flex items-center justify-between"><h2 className="text-base font-bold text-slate-800">ملف قاعدة البيانات</h2><span className="rounded-full bg-blue-50 px-3 py-1 text-xs font-semibold text-blue-700">المصدر الأساسي للفرز</span></div>
-      <DropZone file={databaseFile} onFile={loadDatabase} onClear={() => { setDatabaseFile(null); setDatabaseFileName(""); setDatabaseHeaders([]); setDatabaseRows([]); }} />
+      <DropZone file={databaseFile} rowCount={databaseRows.length} onFile={loadDatabase} onClear={() => { setDatabaseFile(null); setDatabaseFileName(""); setDatabaseHeaders([]); setDatabaseRows([]); }} />
       {!databaseFile && databaseFileName && <p className="text-xs text-emerald-700">بيانات الملف المستعادة: {databaseFileName}</p>}
       {!!databaseHeaders.length && <>
         <div className="flex flex-wrap items-center gap-3">
@@ -1051,10 +1109,10 @@ function StageAPlatform({ onBack, onTransferToB, onTransferVisaToC, onSafeActivi
         <div className="flex flex-wrap items-center gap-1"><strong className="ml-3">نتائج الفرز</strong>{([["all", "الكل"], ["matched", "المطابق"], ["unmatched", "غير المطابق"], ["wallet", "محفظة"], ["جوال بي", "جوال بي"], ["visa", "فيزا"]] as const).map(([value, label]) => <button key={value} onClick={() => setResultFilter(value)} className={`rounded-lg px-2.5 py-1.5 text-xs ${resultFilter === value ? "bg-blue-600 text-white" : "bg-white text-slate-600 hover:bg-blue-50"}`}>{label}</button>)}</div>
         <div className="flex flex-wrap items-center gap-2"><span className="text-xs text-slate-500">مطابق: {results.filter(result => result.matched).length} · غير مطابق: {results.filter(result => !result.matched).length} · المحدد: {selectedResultIds.size}</span>
           <button onClick={selectUnmatchedStageAResults} disabled={!results.some(result => !result.matched)} className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-1.5 text-xs font-medium text-amber-800 disabled:opacity-40">تحديد كل غير المطابق</button>
-          {stageATransferResults.length > 0 && <button onClick={() => { onTransferToB(stageATransferResults, databaseSummary); clearAllStageASelection(); }} className="rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-700">{selectedResultIds.size ? "ترحيل المحدد" : "ترحيل المطابق"} ({stageATransferResults.length}) إلى B ←</button>}
-          {selectedResultIds.size > 0 && <button onClick={() => { onTransferVisaToC(results.filter(result => selectedResultIds.has(resultKey(result)))); clearAllStageASelection(); }} className="rounded-lg bg-amber-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-amber-700">ترحيل المحدد ({selectedResultIds.size}) إلى C ←</button>}
+          <button onClick={() => requestStageATransfer("matched")} disabled={!results.some(result => result.matched)} className="rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-700 disabled:opacity-40">ترحيل المطابق ({results.filter(result => result.matched).length})</button>
+          <button onClick={() => requestStageATransfer("matched-and-selected")} disabled={!results.some(result => result.matched || selectedResultIds.has(resultKey(result)))} className="rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-700 disabled:opacity-40">ترحيل المطابق والمحدد</button>
+          <button onClick={() => requestStageATransfer("all")} className="rounded-lg bg-amber-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-amber-700">ترحيل الكل ({results.length})</button>
           {selectedResultIds.size > 0 && <button onClick={clearAllStageASelection} className="rounded-lg border px-3 py-1.5 text-xs">إلغاء التحديد</button>}
-          {results.some(result => result.category === "فيزا") && <button onClick={() => onTransferVisaToC(results.filter(result => result.category === "فيزا"))} className="rounded-lg bg-amber-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-amber-700">ترحيل كل الفيزا إلى C ←</button>}
         </div>
       </div>
       <div className="overflow-x-auto"><table className="w-full text-sm"><thead className="bg-slate-100 text-xs"><tr><th className="p-3 text-right"><input aria-label="تحديد كل النتائج الظاهرة" type="checkbox" checked={visibleActionResults.length > 0 && visibleActionResults.every(result => selectedResultIds.has(resultKey(result)))} onChange={event => setSelectedResultIds(previous => { const next = new Set(previous); visibleActionResults.forEach(result => event.target.checked ? next.add(resultKey(result)) : next.delete(resultKey(result))); return next; })} /></th>{["المنصة", "التصنيف", "بيان الفاتورة", "اسم الزبون من قاعدة البيانات", "النوع", "مبلغ التطبيق", "إجمالي الفاتورة", "نقدي", "شيك", "دين", "الخصم", "رقم المستخدم", "تاريخ الفاتورة", "الساعة", "رقم الفاتورة", "الحالة", "ملاحظة"].map(column => <th key={column} className="p-3 text-right">{column}</th>)}</tr></thead>
@@ -1064,6 +1122,17 @@ function StageAPlatform({ onBack, onTransferToB, onTransferVisaToC, onSafeActivi
           <td className="p-3">{result.userId || "—"}</td><td className="p-3">{result.invoiceDate || "—"}</td><td className="p-3">{result.registrationTime || "—"}</td><td className="p-3">{result.invoiceNumber || "—"}</td>
           <td className={`p-3 font-semibold ${result.matched ? "text-green-700" : "text-red-700"}`}>{result.matched ? "مطابق" : "غير مطابق"}</td><td className="p-3 text-xs text-orange-700">{result.categoryIssue || result.issue || "—"}</td>
         </tr>)}</tbody></table></div>
+    </div>}
+    {transferDestinationDialog && <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 p-3" role="dialog" aria-modal="true" aria-label="اختيار وجهة الترحيل">
+      <section className="w-full max-w-md rounded-2xl bg-white p-5 shadow-2xl">
+        <h2 className="text-lg font-bold">اختيار وجهة الترحيل</h2>
+        <p className="mt-2 text-sm text-slate-600">سيتم ترحيل {transferDestinationDialog.results.length} فاتورة من {transferDestinationDialog.label}. اختر المنصة:</p>
+        <div className="mt-5 flex flex-wrap gap-2">
+          <button type="button" onClick={() => { onTransferToB(transferDestinationDialog.results, databaseSummary); clearAllStageASelection(); setTransferDestinationDialog(null); }} className="flex-1 rounded-lg bg-emerald-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-emerald-700">منصة B</button>
+          <button type="button" onClick={() => { onTransferVisaToC(transferDestinationDialog.results); clearAllStageASelection(); setTransferDestinationDialog(null); }} className="flex-1 rounded-lg bg-amber-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-amber-700">منصة C</button>
+          <button type="button" onClick={() => setTransferDestinationDialog(null)} className="rounded-lg border px-4 py-2.5 text-sm">إلغاء</button>
+        </div>
+      </section>
     </div>}
     {showDatabaseInvoices && <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 p-3" role="dialog" aria-modal="true" aria-label="تفاصيل فواتير قاعدة البيانات">
         <section className="flex max-h-[92vh] w-full max-w-7xl flex-col overflow-hidden rounded-2xl bg-white shadow-2xl">
@@ -1175,7 +1244,7 @@ function stageBTransferAccountType(transfer: StageBTransfer): string {
   return transfer.accountType || transfer.type;
 }
 
-function StageBPlatform({ invoices, onBack, onTransferVisaToC, onSafeActivities, onOpenInvoiceReference }: { invoices: StageAResult[]; onBack: () => void; onTransferVisaToC: (results: StageAResult[]) => void; onSafeActivities?: (activities: string[]) => void; onOpenInvoiceReference?: (invoice: StageAResult) => boolean }) {
+function StageBPlatform({ invoices, onBack, onTransferVisaToC, onSafeActivities, onOpenInvoiceReference, initialFile }: { invoices: StageAResult[]; onBack: () => void; onTransferVisaToC: (results: StageAResult[]) => void; onSafeActivities?: (activities: string[]) => void; onOpenInvoiceReference?: (invoice: StageAResult) => boolean; initialFile?: ProjectSourceFile }) {
   const emptyMap = useMemo(() => ({ name: "", amount: "", paidAmount: "", receivedAmount: "", accountType: "", userId: "", date: "" }), []);
   const [files, setFiles] = useState<Record<string, File | null>>({ invoiceBank: null, transferBank: null, invoiceWallet: null, transferWallet: null, transferJawwal: null });
   const [headers, setHeaders] = useState<Record<string, string[]>>({ invoiceBank: [], transferBank: [], invoiceWallet: [], transferWallet: [], transferJawwal: [] });
@@ -1211,7 +1280,7 @@ function StageBPlatform({ invoices, onBack, onTransferVisaToC, onSafeActivities,
   const [transferSort, setTransferSort] = useState<StageBSort>("none");
   const [stageBSwaps, setStageBSwaps] = useState<Record<string, boolean>>({ invoiceBank: true, transferBank: false, invoiceWallet: true, transferWallet: false, transferJawwal: true });
   const sessionFileRef = useRef<HTMLInputElement>(null);
-  const hasTransferredInvoices = invoices.some(invoice => invoice.category !== "فيزا");
+  const hasTransferredInvoices = invoices.length > 0;
 
   useEffect(() => {
     storageGet<Record<string, string>>("stage_b_aliases", {}).then(setAliases);
@@ -1240,6 +1309,7 @@ function StageBPlatform({ invoices, onBack, onTransferVisaToC, onSafeActivities,
   const parseAmount = (value: unknown) => Number.parseFloat(String(value ?? "").replace(/[٫٬]/g, match => match === "٫" ? "." : "").replace(/,/g, "")) || 0;
   const loadFile = async (source: "invoiceBank" | "transferBank" | "invoiceWallet" | "transferWallet" | "transferJawwal", file: File) => {
     try {
+      await saveStageASourceFiles("stageB", source, [file]);
       const parsed = parseSheet(await readFileBuf(file));
       setFiles(prev => ({ ...prev, [source]: file }));
       setHeaders(prev => ({ ...prev, [source]: parsed.headers }));
@@ -1263,6 +1333,11 @@ function StageBPlatform({ invoices, onBack, onTransferVisaToC, onSafeActivities,
       setError(null);
     } catch (e) { setError((e as Error).message); }
   };
+  useEffect(() => {
+    if (initialFile?.stage === "stageB" && ["invoiceBank", "transferBank", "invoiceWallet", "transferWallet", "transferJawwal"].includes(initialFile.source)) {
+      void loadFile(initialFile.source as "invoiceBank" | "transferBank" | "invoiceWallet" | "transferWallet" | "transferJawwal", initialFile.file);
+    }
+  }, [initialFile]);
   const processInvoiceFileHeaders = (source: "invoiceBank" | "invoiceWallet") => {
     if (!removeRepeatedInvoiceHeaders) return;
     const fileHeaders = headers[source] ?? [];
@@ -1290,7 +1365,7 @@ function StageBPlatform({ invoices, onBack, onTransferVisaToC, onSafeActivities,
       })).filter(row => row.name || row.amount);
     });
     if (sources.length) return sources;
-    return invoices.filter(invoice => invoice.category !== "فيزا").map((invoice, index) => ({
+    return invoices.map((invoice, index) => ({
       id: `stage-a-${invoice.id}-${index}`, name: invoice.name, originalName: invoice.originalName,
       amount: invoice.amount, accountType: invoice.category || invoice.source, userId: invoice.userId,
       paidAmount: invoice.amount,
@@ -1641,7 +1716,7 @@ function StageBPlatform({ invoices, onBack, onTransferVisaToC, onSafeActivities,
   const renderFile = (source: "invoiceBank" | "transferBank" | "invoiceWallet" | "transferWallet" | "transferJawwal", label: string) => (
     <div className="space-y-3 rounded-xl border border-slate-200 bg-white p-4">
       <h2 className="text-sm font-bold">{label}</h2>
-      <DropZone file={files[source]} onFile={file => loadFile(source, file)} onClear={() => { setFiles(prev => ({ ...prev, [source]: null })); setHeaders(prev => ({ ...prev, [source]: [] })); setRows(prev => ({ ...prev, [source]: [] })); }} />
+      <DropZone file={files[source]} rowCount={rows[source]?.length ?? 0} onFile={file => loadFile(source, file)} onClear={() => { setFiles(prev => ({ ...prev, [source]: null })); setHeaders(prev => ({ ...prev, [source]: [] })); setRows(prev => ({ ...prev, [source]: [] })); }} />
       {!!headers[source].length && <>
         {(source === "invoiceBank" || source === "invoiceWallet") && <div className="flex flex-wrap items-center gap-3">
           <label className="flex items-center gap-2 text-xs text-slate-600"><input type="checkbox" checked={removeRepeatedInvoiceHeaders} onChange={event => setRemoveRepeatedInvoiceHeaders(event.target.checked)} />إزالة الترويسات المكررة</label>
@@ -1666,7 +1741,7 @@ function StageBPlatform({ invoices, onBack, onTransferVisaToC, onSafeActivities,
     const fileData = extraTransfers[platform];
     return <div key={platform} className="space-y-3 rounded-xl border border-indigo-200 bg-white p-4">
       <h2 className="text-sm font-bold">حوالات {platform}</h2>
-      <DropZone file={files[`transferExtra:${platform}`] ?? null} onFile={file => {
+      <DropZone file={files[`transferExtra:${platform}`] ?? null} rowCount={fileData?.rows.length ?? 0} onFile={file => {
         setFiles(previous => ({ ...previous, [`transferExtra:${platform}`]: file }));
         void loadExtraTransfer(platform, file);
       }} onClear={() => {
@@ -1711,9 +1786,9 @@ function StageBPlatform({ invoices, onBack, onTransferVisaToC, onSafeActivities,
       </label>
     </div>}
     <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-sm leading-6 text-emerald-900">تتم المطابقة على أساس المبلغ والاسم معًا. عند الترحيل من A تظهر خانة حوالات لكل منصة رُحّلت فواتيرها، بما فيها بنك فلسطين وبال بي وجوال بي والمنصات الإضافية. نوع الحساب يُحدد من المنصة التي رُحّلت منها الفاتورة.</div>
-    {!!invoices.filter(invoice => invoice.category === "فيزا").length && <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
-      <div><strong>فواتير الفيزا المرحّلة من قاعدة البيانات</strong><div className="mt-1 text-xs">تم الاحتفاظ بنتيجة الفرز، وهذه الفواتير تُرحّل إلى منصة C ولا تدخل في مطابقة B.</div></div>
-      <button onClick={() => onTransferVisaToC(invoices.filter(invoice => invoice.category === "فيزا"))} className="rounded-lg bg-amber-600 px-4 py-2 text-xs font-medium text-white hover:bg-amber-700">ترحيل الفيزا إلى منصة C ({invoices.filter(invoice => invoice.category === "فيزا").length})</button>
+    {invoices.length > 0 && <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
+      <div><strong>فواتير المرحلة B</strong><div className="mt-1 text-xs">يمكنك نقل كل الفواتير إلى منصة C بصرف النظر عن تصنيفها الأصلي.</div></div>
+      <button onClick={() => onTransferVisaToC(invoices)} className="rounded-lg bg-amber-600 px-4 py-2 text-xs font-medium text-white hover:bg-amber-700">ترحيل كل الفواتير إلى C ({invoices.length})</button>
     </div>}
     {error && <div className="rounded-lg bg-red-100 p-3 text-sm text-red-800">{error}</div>}
     <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
@@ -1868,7 +1943,7 @@ function StageDPlatform({ matches, pending, onBack }: { matches: StageCMatch[]; 
       <div className="rounded-xl border border-indigo-200 bg-white p-4">
         <h2 className="mb-3 text-sm font-bold text-indigo-800">حركات بنكية معلقة — مشتريات عمولة تجار</h2>
         {pending.length > 0 && <p className="mb-2 rounded-lg bg-indigo-50 p-3 text-xs text-indigo-800">تم ترحيل {pending.length} حركة من المعلّقات.</p>}
-        <DropZone file={file} onFile={loadFile} onClear={() => { setFile(null); setHeaders([]); setRawRows([]); }} />
+        <DropZone file={file} rowCount={rawRows.length} onFile={loadFile} onClear={() => { setFile(null); setHeaders([]); setRawRows([]); }} />
         {!!headers.length && <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-3">
           <Sel label="بيان الحوالة" headers={headers} value={map.description} onChange={value => setMap(prev => ({ ...prev, description: value }))} />
           <Sel label="المبلغ" headers={headers} value={map.amount} onChange={value => setMap(prev => ({ ...prev, amount: value }))} />
@@ -1889,7 +1964,7 @@ function StageDPlatform({ matches, pending, onBack }: { matches: StageCMatch[]; 
   </div>;
 }
 
-function StageCPlatform({ invoices, pendingBankInputs, onBack, onTransferToD, onSafeActivities }: { invoices: StageAResult[]; pendingBankInputs: StageDBankInput[]; onBack: () => void; onTransferToD?: (matches: StageCMatch[], pending: StageDBankInput[]) => void; onSafeActivities?: (activities: string[]) => void }) {
+function StageCPlatform({ invoices, pendingBankInputs, onBack, onTransferToD, onTransferToB, onSafeActivities, initialFile }: { invoices: StageAResult[]; pendingBankInputs: StageDBankInput[]; onBack: () => void; onTransferToD?: (matches: StageCMatch[], pending: StageDBankInput[]) => void; onTransferToB: (invoices: StageAResult[]) => void; onSafeActivities?: (activities: string[]) => void; initialFile?: ProjectSourceFile }) {
   const [file, setFile] = useState<File | null>(null);
   const [sonyFileName, setSonyFileName] = useState("");
   const [headers, setHeaders] = useState<string[]>([]);
@@ -1929,6 +2004,7 @@ function StageCPlatform({ invoices, pendingBankInputs, onBack, onTransferToD, on
   const parseAmount = (value: unknown) => Number.parseFloat(String(value ?? "").replace(/[٫٬]/g, match => match === "٫" ? "." : "").replace(/,/g, "")) || 0;
   const loadInvoiceFile = async (nextFile: File) => {
     try {
+      await saveStageASourceFiles("stageC", "invoice", [nextFile]);
       const parsed = parseSheet(await readFileBuf(nextFile));
       setInvoiceFile(nextFile);
       setInvoiceFileName(nextFile.name);
@@ -1978,6 +2054,7 @@ function StageCPlatform({ invoices, pendingBankInputs, onBack, onTransferToD, on
   }, [invoices, invoiceRows, invoiceMap]);
   const loadSonyFile = async (nextFile: File) => {
     try {
+      await saveStageASourceFiles("stageC", "sony", [nextFile]);
       const parsed = parseSheet(await readFileBuf(nextFile));
       setFile(nextFile); setHeaders(parsed.headers); setRows(parsed.rows);
       setSonyFileName(nextFile.name);
@@ -1985,6 +2062,11 @@ function StageCPlatform({ invoices, pendingBankInputs, onBack, onTransferToD, on
       setError(null);
     } catch (e) { setError((e as Error).message); }
   };
+  useEffect(() => {
+    if (initialFile?.stage !== "stageC") return;
+    if (initialFile.source === "invoice") void loadInvoiceFile(initialFile.file);
+    else if (initialFile.source === "sony") void loadSonyFile(initialFile.file);
+  }, [initialFile]);
   const runStageC = () => {
     if (!effectiveInvoices.length) { setError("رحّل فواتير الفيزا من A أو ارفع ملف فواتير الفيزا هنا أولاً"); return; }
     if (!rows.length || !map.name || !map.amount) { setError("ارفع ملف سوني كاشير وحدد عمود البيان والمبلغ أولاً"); return; }
@@ -2081,11 +2163,12 @@ function StageCPlatform({ invoices, pendingBankInputs, onBack, onTransferToD, on
         }} className="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white">ترحيل إلى D</button>}
       </div>
     </div>
-    <div className="rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">{invoices.length ? `تم ترحيل ${invoices.length} فاتورة فيزا من A.` : `${effectiveInvoices.length} فاتورة فيزا جاهزة من الملف المرفوع مباشرة.`} تتم المطابقة برقم الفيزا المكوّن من 4 أرقام والمبلغ، ويُحفظ رقم التفويض من صف سوني نفسه.</div>
+    <div className="rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">{invoices.length ? `تم ترحيل ${invoices.length} فاتورة من A.` : `${effectiveInvoices.length} فاتورة جاهزة من الملف المرفوع مباشرة.`} تتم المطابقة برقم الفيزا المكوّن من 4 أرقام والمبلغ، ويُحفظ رقم التفويض من صف سوني نفسه.</div>
+    {invoices.length > 0 && <div className="flex justify-end"><button type="button" onClick={() => onTransferToB(invoices)} className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-700">ترحيل فواتير منصة C إلى B ({invoices.length})</button></div>}
     {error && <div className="rounded-lg bg-red-100 p-3 text-sm text-red-800">{error}</div>}
     {!invoices.length && <div className="rounded-xl border border-slate-200 bg-white p-4">
       <h2 className="mb-3 text-sm font-bold">ملف فواتير الفيزا (إذا لم تُرحّل من A)</h2>
-      <DropZone file={invoiceFile} onFile={loadInvoiceFile} onClear={() => { setInvoiceFile(null); setInvoiceFileName(""); setInvoiceHeaders([]); setInvoiceRows([]); }} />
+      <DropZone file={invoiceFile} rowCount={invoiceRows.length} onFile={loadInvoiceFile} onClear={() => { setInvoiceFile(null); setInvoiceFileName(""); setInvoiceHeaders([]); setInvoiceRows([]); }} />
       {!invoiceFile && invoiceFileName && <p className="mt-2 text-xs text-emerald-700">تم استعادة بيانات الملف المحفوظ: {invoiceFileName}</p>}
       {!!invoiceHeaders.length && <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
         <Sel label="اسم الزبون مع رقم الفيزا" headers={invoiceHeaders} value={invoiceMap.name} onChange={value => setInvoiceMap(prev => ({ ...prev, name: value }))} />
@@ -2094,7 +2177,7 @@ function StageCPlatform({ invoices, pendingBankInputs, onBack, onTransferToD, on
     </div>}
     <div className="rounded-xl border border-slate-200 bg-white p-4">
       <h2 className="mb-3 text-sm font-bold">ملف سوني كاشير فيزا</h2>
-      <DropZone file={file} onFile={loadSonyFile} onClear={() => { setFile(null); setSonyFileName(""); setHeaders([]); setRows([]); }} />
+      <DropZone file={file} rowCount={rows.length} onFile={loadSonyFile} onClear={() => { setFile(null); setSonyFileName(""); setHeaders([]); setRows([]); }} />
       {!file && sonyFileName && <p className="mt-2 text-xs text-emerald-700">تم استعادة بيانات الملف المحفوظ: {sonyFileName}</p>}
       {!!headers.length && <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-3">
         <Sel label="البيان الذي يحتوي رقم الفيزا" headers={headers} value={map.name} onChange={value => setMap(prev => ({ ...prev, name: value }))} />
@@ -2132,12 +2215,19 @@ function StageCPlatform({ invoices, pendingBankInputs, onBack, onTransferToD, on
 }
 
 // ─── Main Component ───────────────────────────────────────────────────────────
-export default function Reconciliation2({ onBack, onStageAToMain, onStageBToMain, onSafeActivities, onOpenInvoiceReference, visaInvoices = [], initialStageDBankInputs = [], initialStage = "hub" }: { onBack: () => void; onStageAToMain?: (results: StageAResult[], summary?: StageASummary) => void; onStageBToMain?: () => void; onSafeActivities?: (activities: string[]) => void; onOpenInvoiceReference?: (invoice: StageAResult) => boolean; visaInvoices?: StageAResult[]; initialStageDBankInputs?: StageDBankInput[]; initialStage?: "hub" | "stageA" | "stageB" | "stageC" | "stageD" | "stageF" }) {
+export default function Reconciliation2({ onBack, onStageAToMain, onStageBToMain, onSafeActivities, onOpenInvoiceReference, visaInvoices = [], initialStageDBankInputs = [], initialStage = "hub", projectSourceFiles = [] }: { onBack: () => void; onStageAToMain?: (results: StageAResult[], summary?: StageASummary) => void; onStageBToMain?: () => void; onSafeActivities?: (activities: string[]) => void; onOpenInvoiceReference?: (invoice: StageAResult) => boolean; visaInvoices?: StageAResult[]; initialStageDBankInputs?: StageDBankInput[]; initialStage?: "hub" | "stageA" | "stageB" | "stageC" | "stageD" | "stageF"; projectSourceFiles?: SavedProjectSourceFile[] }) {
   const [stagePage, setStagePage] = useState<"hub" | "stageA" | "stageB" | "stageC" | "stageD" | "stageF">(initialStage);
   const [stageDMatches, setStageDMatches] = useState<StageCMatch[]>([]);
   const [stageDPending, setStageDPending] = useState<StageDBankInput[]>(initialStageDBankInputs);
   const [stageBInvoices, setStageBInvoices] = useState<StageAResult[]>([]);
   const [stageCInvoices, setStageCInvoices] = useState<StageAResult[]>(visaInvoices);
+  const [transferDialog, setTransferDialog] = useState<{ invoices: StageAResult[]; from: "B" | "C" } | null>(null);
+  const [projectFileToOpen, setProjectFileToOpen] = useState<ProjectSourceFile | null>(null);
+  const openProjectFile = (file: ProjectSourceFile) => {
+    setProjectFileToOpen(file);
+    setStagePage(file.stage);
+  };
+  const openTransferDialog = (invoices: StageAResult[], from: "B" | "C") => setTransferDialog({ invoices, from });
   const stageCSessionLoaded = useRef(false);
   const [sessionLoaded, setSessionLoaded] = useState(false);
 
@@ -2799,20 +2889,20 @@ export default function Reconciliation2({ onBack, onStageAToMain, onStageBToMain
   const canExport = parsedBank.length > 0 || parsedAza.length > 0 || parsedSony.length > 0;
 
   if (stagePage === "stageA") {
-    return <StageAPlatform onBack={() => setStagePage("hub")} onSafeActivities={onSafeActivities} onTransferToB={(results, summary) => {
+    return <><StageAPlatform initialFile={projectFileToOpen?.stage === "stageA" ? projectFileToOpen : undefined} onBack={() => { setProjectFileToOpen(null); setStagePage("hub"); }} onSafeActivities={onSafeActivities} onTransferToB={(results, summary) => {
       onSafeActivities?.(results.filter(result => result.matched && result.issue !== "تم اعتمادها يدوياً").map(result => `${result.originalName} ↔ ${result.databaseName} · ${fmtNum(result.amount)} ₪`));
       if (onStageAToMain) onStageAToMain(results, summary); else { setStageBInvoices(results); setStagePage("stageB"); }
-    }} onTransferVisaToC={results => { setStageCInvoices(results); setStagePage("stageC"); }} />;
+    }} onTransferVisaToC={results => { setStageCInvoices(results); setStagePage("stageC"); }} /><ProjectSourceFileLauncher files={projectSourceFiles.filter(item => item.stage === "stageA")} onOpen={openProjectFile} /></>;
   }
   if (stagePage === "stageB") {
-    return <StageBPlatform invoices={stageBInvoices} onBack={() => setStagePage("hub")} onSafeActivities={onSafeActivities} onOpenInvoiceReference={onOpenInvoiceReference} onTransferVisaToC={results => { setStageCInvoices(results); setStagePage("stageC"); }} />;
+    return <><StageBPlatform initialFile={projectFileToOpen?.stage === "stageB" ? projectFileToOpen : undefined} invoices={stageBInvoices} onBack={() => { setProjectFileToOpen(null); setStagePage("hub"); }} onSafeActivities={onSafeActivities} onOpenInvoiceReference={onOpenInvoiceReference} onTransferVisaToC={results => openTransferDialog(results, "B")} /><ProjectSourceFileLauncher files={projectSourceFiles.filter(item => item.stage === "stageB")} onOpen={openProjectFile} /><StageTransferDialog dialog={transferDialog} onCancel={() => setTransferDialog(null)} onTransferToB={invoices => { setStageBInvoices(previous => [...previous, ...invoices]); setStagePage("stageB"); setTransferDialog(null); }} onTransferToC={invoices => { setStageCInvoices(previous => [...previous, ...invoices]); setStagePage("stageC"); setTransferDialog(null); }} /></>;
   }
   if (stagePage === "stageC") {
     const stageDBankInputs = [
       ...initialStageDBankInputs,
       ...pendingVisaBank.map(item => ({ id: item.id, description: item.bankDesc, amount: item.amount, date: item.date }))
     ];
-    return <StageCPlatform invoices={stageCInvoices} pendingBankInputs={stageDBankInputs} onBack={() => setStagePage("hub")} onSafeActivities={onSafeActivities} onTransferToD={(matches, pending) => { setStageDMatches(matches); setStageDPending(pending); setStagePage("stageD"); }} />;
+    return <><StageCPlatform initialFile={projectFileToOpen?.stage === "stageC" ? projectFileToOpen : undefined} invoices={stageCInvoices} pendingBankInputs={stageDBankInputs} onBack={() => { setProjectFileToOpen(null); setStagePage("hub"); }} onTransferToB={invoices => openTransferDialog(invoices, "C")} onSafeActivities={onSafeActivities} onTransferToD={(matches, pending) => { setStageDMatches(matches); setStageDPending(pending); setStagePage("stageD"); }} /><ProjectSourceFileLauncher files={projectSourceFiles.filter(item => item.stage === "stageC")} onOpen={openProjectFile} /><StageTransferDialog dialog={transferDialog} onCancel={() => setTransferDialog(null)} onTransferToB={invoices => { setStageBInvoices(previous => [...previous, ...invoices]); setStagePage("stageB"); setTransferDialog(null); }} onTransferToC={invoices => { setStageCInvoices(previous => [...previous, ...invoices]); setStagePage("stageC"); setTransferDialog(null); }} /></>;
   }
   if (stagePage === "stageD") {
     return <StageDPlatform matches={stageDMatches} pending={stageDPending} onBack={() => setStagePage("stageC")} />;

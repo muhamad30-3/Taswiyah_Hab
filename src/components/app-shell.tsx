@@ -143,7 +143,12 @@ export function AppShell() {
       setCentralStorageError(detail || "تعذر حفظ البيانات في قاعدة البيانات المركزية.")
     }
     window.addEventListener("central-storage-error", showStorageError)
-    return () => window.removeEventListener("central-storage-error", showStorageError)
+    const clearStorageError = () => setCentralStorageError("")
+    window.addEventListener("central-storage-recovered", clearStorageError)
+    return () => {
+      window.removeEventListener("central-storage-error", showStorageError)
+      window.removeEventListener("central-storage-recovered", clearStorageError)
+    }
   }, [])
 
   useEffect(() => {
