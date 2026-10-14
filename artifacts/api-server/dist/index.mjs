@@ -33380,10 +33380,7 @@ var init_document_ai = __esm({
 function passwordPolicyError(password) {
   const length = Array.from(password).length;
   if (length < minimumPasswordLength || length > maximumPasswordLength) {
-    return "\u0643\u0644\u0645\u0629 \u0627\u0644\u0645\u0631\u0648\u0631 \u064A\u062C\u0628 \u0623\u0646 \u062A\u062A\u0643\u0648\u0646 \u0645\u0646 8 \u0625\u0644\u0649 256 \u0645\u062D\u0631\u0641\u0627\u064B.";
-  }
-  if (!/\p{L}/u.test(password) || !/\p{N}/u.test(password)) {
-    return "\u064A\u062C\u0628 \u0623\u0646 \u062A\u062D\u062A\u0648\u064A \u0643\u0644\u0645\u0629 \u0627\u0644\u0645\u0631\u0648\u0631 \u0639\u0644\u0649 \u062D\u0631\u0641 \u0648\u0627\u062D\u062F \u0648\u0631\u0642\u0645 \u0648\u0627\u062D\u062F \u0639\u0644\u0649 \u0627\u0644\u0623\u0642\u0644.";
+    return "\u0643\u0644\u0645\u0629 \u0627\u0644\u0645\u0631\u0648\u0631 \u064A\u062C\u0628 \u0623\u0646 \u062A\u062A\u0643\u0648\u0646 \u0645\u0646 6 \u0625\u0644\u0649 256 \u0645\u062D\u0631\u0641\u0627\u064B.";
   }
   return null;
 }
@@ -33391,7 +33388,7 @@ var minimumPasswordLength, maximumPasswordLength;
 var init_password_policy = __esm({
   "../../src/lib/password-policy.ts"() {
     "use strict";
-    minimumPasswordLength = 8;
+    minimumPasswordLength = 6;
     maximumPasswordLength = 256;
   }
 });
@@ -47177,7 +47174,7 @@ function authConfigurationError() {
   if (!process.env.DATABASE_URL) missing.push("DATABASE_URL");
   if (!process.env.APP_USERNAME?.trim()) missing.push("APP_USERNAME");
   if (!process.env.APP_PASSWORD || passwordPolicyError(process.env.APP_PASSWORD)) {
-    missing.push("APP_PASSWORD (8 \u0623\u062D\u0631\u0641 \u0639\u0644\u0649 \u0627\u0644\u0623\u0642\u0644\u060C \u0645\u0639 \u062D\u0631\u0641 \u0648\u0631\u0642\u0645)");
+    missing.push("APP_PASSWORD (6 \u0645\u062D\u0627\u0631\u0641 \u0639\u0644\u0649 \u0627\u0644\u0623\u0642\u0644)");
   }
   if (!sessionSecret()) missing.push("APP_SESSION_SECRET (32 \u0628\u0627\u064A\u062A \u0639\u0644\u0649 \u0627\u0644\u0623\u0642\u0644)");
   return missing.length ? `\u0625\u0639\u062F\u0627\u062F\u0627\u062A \u0627\u0644\u062E\u0627\u062F\u0645 \u063A\u064A\u0631 \u0645\u0643\u062A\u0645\u0644\u0629: ${missing.join("\u060C ")}.` : null;

@@ -14,9 +14,9 @@ function runPnpm(args, cwd) {
   );
 }
 
-const children = [
-  runPnpm(["run", "dev:web"], root),
-  runPnpm(["--dir", "artifacts/api-server", "run", "dev"], root),
+const services = [
+  { name: "Web", child: runPnpm(["run", "dev:web"], root) },
+  { name: "API", child: runPnpm(["--dir", "artifacts/api-server", "run", "dev"], root) },
 ];
 
 let stopping = false;
@@ -24,24 +24,22 @@ let stopping = false;
 function stopChildren(exitCode = 0) {
   if (stopping) return;
   stopping = true;
-  for (const child of children) {
+  for (const { child } of services) {
     if (child.exitCode === null && !child.killed) child.kill();
   }
   process.exitCode = exitCode;
 }
 
-for (const child of children) {
+for (const { name, child } of services) {
   child.on("error", error => {
-    console.error("Could not start a development service:", error.message);
+    console.error(`Could not start the ${name} development service:`, error.message);
     stopChildren(1);
   });
   child.on("exit", (code, signal) => {
     if (stopping) return;
     const exitCode = code ?? (signal ? 1 : 0);
-    if (exitCode !== 0) {
-      console.error(`A development service exited (${signal ?? `code ${exitCode}`}); stopping the other service.`);
-      stopChildren(exitCode);
-    }
+    console.error(`${name} development service exited (${signal ?? `code ${exitCode}`}); stopping the other service.`);
+    stopChildren(exitCode);
   });
 }
 

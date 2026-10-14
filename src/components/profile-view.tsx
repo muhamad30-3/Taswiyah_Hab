@@ -132,12 +132,12 @@ export function ProfileView({
             value={password}
             onChange={(e) => setPassword(e.target.value)}
             maxLength={256}
-            minLength={password ? 8 : undefined}
+            minLength={password ? 6 : undefined}
             required={centralStorageEnabled}
             placeholder={centralStorageEnabled ? "اختر كلمة مرور جديدة" : "اتركها فارغة للإبقاء على الحالية"}
             className="w-full rounded-lg border border-border bg-background px-3 py-2.5 text-sm outline-none focus:border-primary focus:ring-1 focus:ring-primary"
           />
-          <p className="text-xs text-muted-foreground">8 محارف على الأقل، تشمل حرفاً ورقماً؛ الحد الأقصى 256 حرفاً.</p>
+          <p className="text-xs text-muted-foreground">6 محارف على الأقل، ويمكن أن تكون أرقاماً فقط؛ الحد الأقصى 256 حرفاً.</p>
         </div>
 
         {error && <p role="alert" className="rounded-lg bg-destructive/10 px-3 py-2 text-sm text-destructive">{error}</p>}

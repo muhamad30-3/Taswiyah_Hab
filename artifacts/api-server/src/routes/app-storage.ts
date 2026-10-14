@@ -42,7 +42,7 @@ function authConfigurationError() {
   if (!process.env.DATABASE_URL) missing.push("DATABASE_URL");
   if (!process.env.APP_USERNAME?.trim()) missing.push("APP_USERNAME");
   if (!process.env.APP_PASSWORD || passwordPolicyError(process.env.APP_PASSWORD)) {
-    missing.push("APP_PASSWORD (8 أحرف على الأقل، مع حرف ورقم)");
+    missing.push("APP_PASSWORD (6 محارف على الأقل)");
   }
   if (!sessionSecret()) missing.push("APP_SESSION_SECRET (32 بايت على الأقل)");
   return missing.length ? `إعدادات الخادم غير مكتملة: ${missing.join("، ")}.` : null;

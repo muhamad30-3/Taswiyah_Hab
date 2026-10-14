@@ -511,6 +511,12 @@ interface SavedMatch {
   bankDefaultRef?: string;
   cashierName: string;
   bankDesc: string;
+  cashierIdentity?: string;
+  bankIdentity?: string;
+  cashierDate?: string;
+  bankDate?: string;
+  cashierAmount?: number;
+  cashierRawName?: string;
   amount: number;
   type: "مدفوع" | "مستلم";
   date: string;
@@ -530,56 +536,137 @@ interface SavedMatch {
 }
 
 function dedupeSavedMatches(matches: SavedMatch[]): SavedMatch[] {
-  const cashierKeys = new Set<string>();
-  const bankKeys = new Set<string>();
-
+  const seen = new Set<string>();
   return matches.filter(match => {
-    const cashierKey = `${match.cashierSessionId ?? "legacy"}:${match.cashierId}`;
-    const bankKey = `${match.bankSessionId ?? "legacy"}:${match.bankId}`;
-
-    if (cashierKeys.has(cashierKey) || bankKeys.has(bankKey)) {
-      return false;
-    }
-    cashierKeys.add(cashierKey);
-    bankKeys.add(bankKey);
+    if (seen.has(match.id)) return false;
+    seen.add(match.id);
     return true;
   });
 }
 
+function normalizeMovementIdentityText(value: string): string {
+  return value.normalize("NFKC")
+    .replace(/[\u064B-\u065F\u0670\u0640]/g, "")
+    .replace(/[أإآ]/g, "ا")
+    .toLocaleLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, "");
+}
+
+function normalizeMovementIdentityDate(value: string): string {
+  const normalized = value.normalize("NFKC")
+    .replace(/[٠-٩]/g, digit => String("٠١٢٣٤٥٦٧٨٩".indexOf(digit)))
+    .replace(/[۰-۹]/g, digit => String("۰۱۲۳۴۵۶۷۸۹".indexOf(digit)))
+    .trim();
+  const parts = normalized.match(/^(\d{1,4})[./-](\d{1,2})[./-](\d{1,4})/);
+  if (!parts) return normalizeMovementIdentityText(normalized);
+  const [, first, second, third] = parts;
+  const [year, month, day] = first.length === 4 ? [first, second, third] : [third, second, first];
+  return `${year.padStart(4, "0")}-${month.padStart(2, "0")}-${day.padStart(2, "0")}`;
+}
+
+function actualMovementReference(reference: string, description: string): string {
+  const explicit = reference.trim();
+  if (explicit) return normalizeMovementIdentityText(explicit);
+  const match = description.match(
+    /(?:رقم\s*(?:الحركة|المعاملة|القيد|المرجع)|(?:transaction|movement|reference)\s*(?:number|no|id)?)\s*[:#：/-]?\s*([a-z\d-]{5,})|\/(\d{8,})\s*\/0\b|\b(pacs008-[a-z\d-]+|pibc[a-z\d-]+)\b/i,
+  );
+  return normalizeMovementIdentityText(match?.[1] ?? match?.[2] ?? match?.[3] ?? "");
+}
+
+function movementIdentity(row: BankRow | CashierRow): string {
+  const isBank = "rawAmount" in row;
+  const description = isBank ? row.description : row.rawName;
+  const reference = actualMovementReference(row.ref, description);
+  return JSON.stringify([
+    normalizeMovementIdentityText(row.accountType),
+    normalizeMovementIdentityDate(row.date),
+    row.type,
+    Math.round((isBank ? row.rawAmount : row.amount) * 100),
+    reference ? `ref:${reference}` : `description:${normalizeMovementIdentityText(description)}`,
+  ]);
+}
+
+function savedBankSnapshotMatches(match: SavedMatch, row: BankRow): boolean {
+  return (!match.bankDesc || row.description === match.bankDesc) &&
+    Math.abs(row.rawAmount - match.amount) <= 0.01 &&
+    row.type === match.type &&
+    (!match.bankAccountType || row.accountType === match.bankAccountType) &&
+    (!match.bankDate || normalizeMovementIdentityDate(row.date) === normalizeMovementIdentityDate(match.bankDate));
+}
+
+function savedCashierSnapshotMatches(match: SavedMatch, row: CashierRow): boolean {
+  return row.name === match.cashierName &&
+    row.type === match.type &&
+    (!match.cashierAccountType || row.accountType === match.cashierAccountType) &&
+    (!match.cashierDate || normalizeMovementIdentityDate(row.date) === normalizeMovementIdentityDate(match.cashierDate)) &&
+    (match.cashierRawName == null || row.rawName === match.cashierRawName) &&
+    (match.cashierAmount == null || Math.abs(row.amount - match.cashierAmount) <= 0.01);
+}
+
+function savedBankCandidates(match: SavedMatch, rows: BankRow[]): BankRow[] {
+  if (match.bankIdentity) {
+    return rows.filter(row => movementIdentity(row) === match.bankIdentity);
+  }
+  const reference = actualMovementReference("", match.bankDesc);
+  if (reference) {
+    const referenceMatches = rows.filter(row => actualMovementReference(row.ref, row.description) === reference);
+    if (referenceMatches.length) return referenceMatches;
+  }
+  const description = normalizeMovementIdentityText(match.bankDesc);
+  const descriptionWithoutNumbers = normalizeMovementIdentityText(match.bankDesc.replace(/\d+/g, ""));
+  return rows.filter(row =>
+    row.type === match.type &&
+    Math.abs(row.rawAmount - match.amount) <= 0.01 &&
+    (!match.bankAccountType || row.accountType === match.bankAccountType) &&
+    (normalizeMovementIdentityText(row.description) === description ||
+      normalizeMovementIdentityText(row.description.replace(/\d+/g, "")) === descriptionWithoutNumbers)
+  );
+}
+
+function savedCashierCandidates(match: SavedMatch, rows: CashierRow[]): CashierRow[] {
+  if (match.cashierIdentity) {
+    return rows.filter(row => movementIdentity(row) === match.cashierIdentity);
+  }
+  return rows.filter(row =>
+    row.name === match.cashierName &&
+    row.type === match.type &&
+    (!match.cashierAccountType || row.accountType === match.cashierAccountType) &&
+    (match.cashierDate == null || normalizeMovementIdentityDate(row.date) === normalizeMovementIdentityDate(match.cashierDate)) &&
+    (match.cashierRawName == null || row.rawName === match.cashierRawName) &&
+    (match.cashierAmount == null || Math.abs(row.amount - match.cashierAmount) <= 0.01)
+  );
+}
+
 function resolveSavedCashierRow(match: SavedMatch, rows: CashierRow[]): CashierRow | undefined {
-  let candidates = rows.filter(row => row.id === match.cashierId);
+  if (match.cashierIdentity) {
+    const identityMatches = savedCashierCandidates(match, rows);
+    return identityMatches.length === 1 ? identityMatches[0] : undefined;
+  }
+
+  let candidates = rows.filter(row => row.id === match.cashierId && savedCashierSnapshotMatches(match, row));
   if (match.cashierSessionId != null) {
     candidates = candidates.filter(row => (row._fileSessionId ?? 0) === match.cashierSessionId);
-  } else {
-    if (match.cashierName) {
-      const named = candidates.filter(row => row.name === match.cashierName);
-      if (named.length) candidates = named;
-    }
-    if (match.cashierAccountType) {
-      const sameAccount = candidates.filter(row => row.accountType === match.cashierAccountType);
-      if (sameAccount.length) candidates = sameAccount;
-    }
   }
-  return candidates[0];
+  return candidates.length === 1 ? candidates[0] : undefined;
 }
 
 function resolveSavedBankRow(match: SavedMatch, rows: BankRow[]): BankRow | undefined {
-  let candidates = rows.filter(row => row.id === match.bankId);
-  if (match.bankSessionId != null) {
-    candidates = candidates.filter(row => (row._fileSessionId ?? 0) === match.bankSessionId);
-  } else {
-    if (match.bankDesc) {
-      const sameDescription = candidates.filter(row => row.description === match.bankDesc);
-      if (sameDescription.length) candidates = sameDescription;
-    }
-    if (match.bankAccountType) {
-      const sameAccount = candidates.filter(row => row.accountType === match.bankAccountType);
-      if (sameAccount.length) candidates = sameAccount;
-    }
-    const sameAmount = candidates.filter(row => Math.abs(row.rawAmount - match.amount) <= 0.01);
-    if (sameAmount.length) candidates = sameAmount;
+  if (match.bankIdentity) {
+    const identityMatches = savedBankCandidates(match, rows);
+    return identityMatches.length === 1 ? identityMatches[0] : undefined;
   }
-  return candidates[0];
+
+  let candidates = savedBankCandidates(match, rows).filter(row => savedBankSnapshotMatches(match, row));
+  if (match.bankSessionId != null) {
+    const sameSessionAndRow = candidates.filter(row =>
+      row.id === match.bankId && (row._fileSessionId ?? 0) === match.bankSessionId
+    );
+    if (sameSessionAndRow.length === 1) return sameSessionAndRow[0];
+  } else {
+    const sameLegacyRow = candidates.filter(row => row.id === match.bankId);
+    if (sameLegacyRow.length === 1) return sameLegacyRow[0];
+  }
+  return candidates.length === 1 ? candidates[0] : undefined;
 }
 
 function matchesPhoneAndAmount(cashier: CashierRow, bank: BankRow): boolean {
@@ -1040,14 +1127,6 @@ function reconcile(
   const savedKeys = new Set(uniqueSavedMatches.map(({ cashierRow, bankRow }) => `${cashierKey(cashierRow)}-${bankKey(bankRow)}`));
   const savedCashierIds = new Set(uniqueSavedMatches.map(({ cashierRow }) => cashierKey(cashierRow)));
   const savedBankIds = new Set(uniqueSavedMatches.map(({ bankRow }) => bankKey(bankRow)));
-  savedMatches.forEach(match => {
-    const cashierRow = resolveSavedCashierRow(match, cashier);
-    const bankRow = resolveSavedBankRow(match, bank);
-    if (cashierRow) savedCashierIds.add(cashierKey(cashierRow));
-    if (bankRow) savedBankIds.add(bankKey(bankRow));
-  });
-  savedCashierIds.forEach(key => usedCashier.add(key));
-  savedBankIds.forEach(key => usedBank.add(key));
 
   uniqueSavedMatches.forEach(({ match, bankRow, cashierRow }) => {
     results.push({ type: "saved", bank: bankRow, cashier: cashierRow, savedMatch: match });
@@ -4463,12 +4542,43 @@ export default function App({ initialPage = "recon2", onSafeActivities }: { init
   })), [savedMatches, activeCashier, activeBank]);
   const savedCashierIds = useMemo(() => new Set(savedMatches.flatMap(saved => {
     const cashier = resolveSavedCashierRow(saved, activeCashier);
-    return cashier ? [transactionKey(cashier)] : [];
-  })), [savedMatches, activeCashier]);
-  const savedBankIds = useMemo(() => new Set(savedMatches.flatMap(saved => {
     const bank = resolveSavedBankRow(saved, activeBank);
-    return bank ? [transactionKey(bank)] : [];
-  })), [savedMatches, activeBank]);
+    return cashier && bank ? [transactionKey(cashier)] : [];
+  })), [savedMatches, activeCashier, activeBank]);
+  const savedBankIds = useMemo(() => new Set(savedMatches.flatMap(saved => {
+    const cashier = resolveSavedCashierRow(saved, activeCashier);
+    const bank = resolveSavedBankRow(saved, activeBank);
+    return cashier && bank ? [transactionKey(bank)] : [];
+  })), [savedMatches, activeCashier, activeBank]);
+  const savedMatchIssues = useMemo(() => {
+    if (!bankSourceRows.length || !cashierSourceRows.length) return [];
+    const claimedBanks = new Set<string>();
+    const claimedCashiers = new Set<string>();
+    return savedMatches.flatMap(match => {
+      const bankCandidates = savedBankCandidates(match, bankSourceRows);
+      const cashierCandidates = savedCashierCandidates(match, cashierSourceRows);
+      const bank = resolveSavedBankRow(match, bankSourceRows);
+      const cashier = resolveSavedCashierRow(match, cashierSourceRows);
+      const bankKey = bank ? transactionKey(bank) : "";
+      const cashierKey = cashier ? transactionKey(cashier) : "";
+      const duplicateBank = !!bankKey && claimedBanks.has(bankKey);
+      const duplicateCashier = !!cashierKey && claimedCashiers.has(cashierKey);
+      if (bankKey && !duplicateBank) claimedBanks.add(bankKey);
+      if (cashierKey && !duplicateCashier) claimedCashiers.add(cashierKey);
+      if (bank && cashier && !duplicateBank && !duplicateCashier) return [];
+      return [{
+        match,
+        bankCandidates,
+        cashierCandidates,
+        reasons: [
+          !bank ? bankCandidates.length > 1 ? "وجدت أكثر من حوالة مرشحة؛ لم يتم اختيار واحدة تلقائياً" : "تعذّر التحقق من الحوالة المحفوظة" : "",
+          !cashier ? cashierCandidates.length > 1 ? "وجدت أكثر من فاتورة مرشحة؛ لم يتم اختيار واحدة تلقائياً" : "تعذّر التحقق من الفاتورة المحفوظة" : "",
+          duplicateBank ? "الحوالة مرتبطة بمطابقة محفوظة أخرى" : "",
+          duplicateCashier ? "الفاتورة مرتبطة بمطابقة محفوظة أخرى" : "",
+        ].filter(Boolean),
+      }];
+    });
+  }, [savedMatches, bankSourceRows, cashierSourceRows]);
   const pendingCashierIds = useMemo(
     () => new Set((results?.filter(r => r.type === "pending") as any[] ?? []).map((r:any) => r.cashier.id as number)),
     [results]
@@ -4805,6 +4915,9 @@ export default function App({ initialPage = "recon2", onSafeActivities }: { init
       cashierDefaultRef: cashierRow.defaultRef || transactionKey(cashierRow),
       bankDefaultRef: bankRow.defaultRef || transactionKey(bankRow),
       cashierName: cashierRow.name, bankDesc: bankRow.description,
+      cashierIdentity: movementIdentity(cashierRow), bankIdentity: movementIdentity(bankRow),
+      cashierDate: cashierRow.date, bankDate: bankRow.date,
+      cashierAmount: cashierRow.amount, cashierRawName: cashierRow.rawName,
       amount: bankRow.rawAmount, type: cashierRow.type,
       date: new Date().toLocaleDateString("ar-SA"),
       savedAt: new Date().toLocaleString("ar-SA"),
@@ -4996,6 +5109,9 @@ export default function App({ initialPage = "recon2", onSafeActivities }: { init
         cashierDefaultRef: cashierRow.defaultRef || transactionKey(cashierRow),
         bankDefaultRef: bankRow.defaultRef || transactionKey(bankRow),
         cashierName: cashierRow.name, bankDesc: bankRow.description,
+        cashierIdentity: movementIdentity(cashierRow), bankIdentity: movementIdentity(bankRow),
+        cashierDate: cashierRow.date, bankDate: bankRow.date,
+        cashierAmount: cashierRow.amount, cashierRawName: cashierRow.rawName,
         amount: bankRow.rawAmount, type: cashierRow.type,
         date: new Date().toLocaleDateString("ar-SA"),
         savedAt: new Date().toLocaleString("ar-SA"),
@@ -5271,7 +5387,12 @@ export default function App({ initialPage = "recon2", onSafeActivities }: { init
           id: `manual-${g.id}-${cashier.id}-${bank.id}`,
           cashierId: cashier.id, bankId: bank.id,
           cashierSessionId: cashier._fileSessionId ?? 0, bankSessionId: bank._fileSessionId ?? 0,
+          cashierDefaultRef: cashier.defaultRef || transactionKey(cashier),
+          bankDefaultRef: bank.defaultRef || transactionKey(bank),
           cashierName: cashier.name, bankDesc: bank.description,
+          cashierIdentity: movementIdentity(cashier), bankIdentity: movementIdentity(bank),
+          cashierDate: cashier.date, bankDate: bank.date,
+          cashierAmount: cashier.amount, cashierRawName: cashier.rawName,
           amount: bank.rawAmount, type: cashier.type,
           date: new Date().toLocaleDateString("ar-SA"),
           savedAt: new Date().toLocaleString("ar-SA"),
@@ -5435,8 +5556,23 @@ export default function App({ initialPage = "recon2", onSafeActivities }: { init
         cashierId: row.id,
         cashierSessionId: row._fileSessionId ?? 0,
         bankId: virtualBankId,
+        bankSessionId: bank._fileSessionId ?? 0,
+        cashierDefaultRef: row.defaultRef || transactionKey(row),
+        bankDefaultRef: bank.defaultRef || transactionKey(bank),
         cashierName: row.name,
         bankDesc: bank.description,
+        cashierIdentity: movementIdentity(row),
+        bankIdentity: movementIdentity({
+          ...bank,
+          id: virtualBankId,
+          rawAmount: total,
+          debit: bank.type === "مستلم" ? total : 0,
+          credit: bank.type === "مدفوع" ? total : 0,
+        }),
+        cashierDate: row.date,
+        bankDate: bank.date,
+        cashierAmount: row.amount,
+        cashierRawName: row.rawName,
         amount: total,
         type: row.type,
         date: new Date().toLocaleDateString("ar-SA"),

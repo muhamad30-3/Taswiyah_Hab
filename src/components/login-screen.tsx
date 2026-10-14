@@ -147,7 +147,7 @@ export function LoginScreen({ onLogin, initialError }: { onLogin: (user: Central
                 autoComplete={registrationMode ? "new-password" : "current-password"}
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
-                minLength={registrationMode ? 8 : undefined}
+                minLength={registrationMode ? 6 : undefined}
                 maxLength={256}
                 required
               className="w-full rounded-xl border border-white/10 bg-white/[.07] py-3 pr-9 pl-9 text-sm text-white outline-none placeholder:text-white/30 focus:border-[hsl(43_96%_52%)] focus:ring-1 focus:ring-[hsl(43_96%_52%/.25)]"
@@ -162,7 +162,7 @@ export function LoginScreen({ onLogin, initialError }: { onLogin: (user: Central
                 {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
               </button>
             </div>
-            {registrationMode && <p className="text-xs text-white/60">8 محارف على الأقل، تشمل حرفاً ورقماً.</p>}
+            {registrationMode && <p className="text-xs text-white/60">6 محارف على الأقل؛ يمكنك استخدام 6 أرقام.</p>}
           </div>
 
           {error && (

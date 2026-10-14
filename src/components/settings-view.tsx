@@ -68,7 +68,7 @@ function PasswordChangeForm({
             autoComplete="new-password"
             value={password}
             onChange={event => setPassword(event.target.value)}
-            minLength={requireLetterAndNumber ? 8 : undefined}
+            minLength={requireLetterAndNumber ? 6 : undefined}
             maxLength={requireLetterAndNumber ? 256 : undefined}
             className="w-full rounded-lg border border-border bg-card px-3 py-2.5 text-sm outline-none focus:border-primary focus:ring-1 focus:ring-primary"
           />
@@ -174,7 +174,7 @@ export function SettingsView({
             : <PasswordChangeForm
               id="login-password"
               title="كلمة مرور تسجيل الدخول"
-              description="تُستخدم عند تسجيل الدخول إلى المنصة فقط. يجب أن تتكون من 8 محارف على الأقل وتشمل حرفاً ورقماً."
+              description="تُستخدم عند تسجيل الدخول إلى المنصة فقط. يجب أن تتكون من 6 محارف على الأقل، ويمكن أن تكون أرقاماً فقط."
               onSave={onChangeLoginPassword}
               requireLetterAndNumber
             />}
