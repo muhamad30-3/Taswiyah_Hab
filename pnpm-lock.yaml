@@ -1,7 +1,7 @@
 lockfileVersion: '9.0'
 
 settings:
-  autoInstallPeers: true
+  autoInstallPeers: false
   excludeLinksFromLockfile: false
 
 catalogs:
@@ -291,7 +291,7 @@ importers:
         version: 19.3.0(@types/react@19.3.0)
       '@vitejs/plugin-react':
         specifier: ''
-        version: 6.1.1(vite@8.2.2(@types/node@26.6.4)(esbuild@0.27.3)(jiti@1.21.7)(tsx@4.23.13)(yaml@2.9.0))
+        version: 6.1.1(vite@8.2.2(@types/node@26.6.4)(esbuild@0.27.3)(jiti@2.7.0)(tsx@4.23.13)(yaml@2.9.0))
       '@workspace/api-client-react':
         specifier: workspace:*
         version: link:lib/api-client-react
@@ -378,7 +378,7 @@ importers:
         version: 1.1.2(@types/react-dom@19.3.0(@types/react@19.3.0))(@types/react@19.3.0)(react-dom@19.3.0(react@19.3.0))(react@19.3.0)
       vite:
         specifier: ''
-        version: 8.2.2(@types/node@26.6.4)(esbuild@0.27.3)(jiti@1.21.7)(tsx@4.23.13)(yaml@2.9.0)
+        version: 8.2.2(@types/node@26.6.4)(esbuild@0.27.3)(jiti@2.7.0)(tsx@4.23.13)(yaml@2.9.0)
       wouter:
         specifier: ^3.3.5
         version: 3.11.0(react@19.3.0)
@@ -635,9 +635,6 @@ importers:
       '@tanstack/react-query':
         specifier: 'catalog:'
         version: 5.102.8(react@19.3.0)
-      react:
-        specifier: '>=18'
-        version: 19.3.0
 
   lib/api-spec:
     devDependencies:
@@ -2251,11 +2248,6 @@ packages:
 
   ajv-formats@3.0.1:
     resolution: {integrity: sha512-8iUql50EUR+uUcdRQ3HDqa6EVyo3docL8g5WJ3FNcWmu62IbkGUue/pEyLBW8VGKKucTPgqeks4fIU1DA4yowQ==}
-    peerDependencies:
-      ajv: ^8.0.0
-    peerDependenciesMeta:
-      ajv:
-        optional: true
 
   ajv@8.20.0:
     resolution: {integrity: sha512-Thbli+OlOj+iMPYFBVBfJ3OmCAnaSyNn4M1vz9T6Gka5Jt9ba/HIR56joy65tY6kx/FCF5VXNB819Y7/GUrBGA==}
@@ -6107,7 +6099,7 @@ snapshots:
       '@scalar/openapi-upgrader': 0.2.15
       ajv: 8.20.0
       ajv-draft-04: 1.0.0(ajv@8.20.0)
-      ajv-formats: 3.0.1(ajv@8.20.0)
+      ajv-formats: 3.0.1
       jsonpointer: 5.0.1
       leven: 4.1.0
       yaml: 2.9.0
@@ -6444,10 +6436,10 @@ snapshots:
     transitivePeerDependencies:
       - supports-color
 
-  '@vitejs/plugin-react@6.1.1(vite@8.2.2(@types/node@26.6.4)(esbuild@0.27.3)(jiti@1.21.7)(tsx@4.23.13)(yaml@2.9.0))':
+  '@vitejs/plugin-react@6.1.1(vite@8.2.2(@types/node@26.6.4)(esbuild@0.27.3)(jiti@2.7.0)(tsx@4.23.13)(yaml@2.9.0))':
     dependencies:
       '@rolldown/pluginutils': 1.0.1
-      vite: 8.2.2(@types/node@26.6.4)(esbuild@0.27.3)(jiti@1.21.7)(tsx@4.23.13)(yaml@2.9.0)
+      vite: 8.2.2(@types/node@26.6.4)(esbuild@0.27.3)(jiti@2.7.0)(tsx@4.23.13)(yaml@2.9.0)
 
   accepts@2.0.0:
     dependencies:
@@ -6467,8 +6459,8 @@ snapshots:
     optionalDependencies:
       ajv: 8.20.0
 
-  ajv-formats@3.0.1(ajv@8.20.0):
-    optionalDependencies:
+  ajv-formats@3.0.1:
+    dependencies:
       ajv: 8.20.0
 
   ajv@8.20.0:
@@ -8335,7 +8327,7 @@ snapshots:
       tsx: 4.23.13
       yaml: 2.9.0
 
-  vite@8.2.2(@types/node@26.6.4)(esbuild@0.27.3)(jiti@1.21.7)(tsx@4.23.13)(yaml@2.9.0):
+  vite@8.2.2(@types/node@26.6.4)(esbuild@0.27.3)(jiti@2.7.0)(tsx@4.23.13)(yaml@2.9.0):
     dependencies:
       lightningcss: 1.33.0
       picomatch: 4.0.7
@@ -8346,7 +8338,7 @@ snapshots:
       '@types/node': 26.6.4
       esbuild: 0.27.3
       fsevents: 2.3.3
-      jiti: 1.21.7
+      jiti: 2.7.0
       tsx: 4.23.13
       yaml: 2.9.0
 
