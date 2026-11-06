@@ -40,6 +40,7 @@ function normalizeColumnName(value: string): string {
 
 function columnRole(header: string, role: MergeRole): ColumnRole | null {
   const normalized = normalizeColumnName(header);
+  if (role === "jawwalBank" && /(?:مرسل|مستقبل|sender|recipient|receiver)/.test(normalized)) return null;
   if (role === "bank") {
     if (/^(?:actual date|التاريخ الفعلي|تاريخ فعلي|التاريخ الحقيقي|تاريخ حقيقي)$/.test(normalized)) return "actualDate";
     if (/^(?:bank date|التاريخ البنكي|تاريخ بنكي)$/.test(normalized)) return "bankDate";

@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from "react"
 import { Download, File, RefreshCw, Trash2, Upload } from "lucide-react"
 import { deleteStoredFile, downloadStoredFile, listStoredFiles, uploadStoredFile, type StoredFile } from "../lib/central-storage"
+import { useGlobalLoading } from "./global-loading"
 
 function formatBytes(size: number) {
   if (size < 1024) return `${size} بايت`
@@ -15,6 +16,8 @@ export function UserFilesView() {
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState("")
   const [error, setError] = useState("")
+
+  useGlobalLoading(busy, "جاري تحميل الملفات أو معالجتها...")
 
   const refresh = useCallback(async () => {
     setBusy(true)

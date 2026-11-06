@@ -21240,27 +21240,27 @@ var require_router = __commonJS({
     var slice = Array.prototype.slice;
     var flatten = Array.prototype.flat;
     var methods = METHODS.map((method) => method.toLowerCase());
-    module.exports = Router5;
+    module.exports = Router6;
     module.exports.Route = Route;
-    function Router5(options) {
-      if (!(this instanceof Router5)) {
-        return new Router5(options);
+    function Router6(options) {
+      if (!(this instanceof Router6)) {
+        return new Router6(options);
       }
       const opts = options || {};
-      function router5(req, res, next) {
-        router5.handle(req, res, next);
+      function router6(req, res, next) {
+        router6.handle(req, res, next);
       }
-      Object.setPrototypeOf(router5, this);
-      router5.caseSensitive = opts.caseSensitive;
-      router5.mergeParams = opts.mergeParams;
-      router5.params = {};
-      router5.strict = opts.strict;
-      router5.stack = [];
-      return router5;
+      Object.setPrototypeOf(router6, this);
+      router6.caseSensitive = opts.caseSensitive;
+      router6.mergeParams = opts.mergeParams;
+      router6.params = {};
+      router6.strict = opts.strict;
+      router6.stack = [];
+      return router6;
     }
-    Router5.prototype = function() {
+    Router6.prototype = function() {
     };
-    Router5.prototype.param = function param(name, fn) {
+    Router6.prototype.param = function param(name, fn) {
       if (!name) {
         throw new TypeError("argument name is required");
       }
@@ -21280,7 +21280,7 @@ var require_router = __commonJS({
       params.push(fn);
       return this;
     };
-    Router5.prototype.handle = function handle(req, res, callback) {
+    Router6.prototype.handle = function handle(req, res, callback) {
       if (!callback) {
         throw new TypeError("argument callback is required");
       }
@@ -21407,7 +21407,7 @@ var require_router = __commonJS({
         }
       }
     };
-    Router5.prototype.use = function use(handler) {
+    Router6.prototype.use = function use(handler) {
       let offset = 0;
       let path2 = "/";
       if (typeof handler !== "function") {
@@ -21440,7 +21440,7 @@ var require_router = __commonJS({
       }
       return this;
     };
-    Router5.prototype.route = function route(path2) {
+    Router6.prototype.route = function route(path2) {
       const route2 = new Route(path2);
       const layer = new Layer(path2, {
         sensitive: this.caseSensitive,
@@ -21455,7 +21455,7 @@ var require_router = __commonJS({
       return route2;
     };
     methods.concat("all").forEach(function(method) {
-      Router5.prototype[method] = function(path2) {
+      Router6.prototype[method] = function(path2) {
         const route = this.route(path2);
         route[method].apply(route, slice.call(arguments, 1));
         return this;
@@ -21638,13 +21638,13 @@ var require_application = __commonJS({
     var compileTrust = require_utils3().compileTrust;
     var resolve = __require("node:path").resolve;
     var once = require_once();
-    var Router5 = require_router();
+    var Router6 = require_router();
     var slice = Array.prototype.slice;
     var flatten = Array.prototype.flat;
     var app3 = exports = module.exports = {};
     var trustProxyDefaultSymbol = "@@symbol:trust_proxy_default";
     app3.init = function init() {
-      var router5 = null;
+      var router6 = null;
       this.cache = /* @__PURE__ */ Object.create(null);
       this.engines = /* @__PURE__ */ Object.create(null);
       this.settings = /* @__PURE__ */ Object.create(null);
@@ -21653,13 +21653,13 @@ var require_application = __commonJS({
         configurable: true,
         enumerable: true,
         get: function getrouter() {
-          if (router5 === null) {
-            router5 = new Router5({
+          if (router6 === null) {
+            router6 = new Router6({
               caseSensitive: this.enabled("case sensitive routing"),
               strict: this.enabled("strict routing")
             });
           }
-          return router5;
+          return router6;
         }
       });
     };
@@ -21730,15 +21730,15 @@ var require_application = __commonJS({
       if (fns.length === 0) {
         throw new TypeError("app.use() requires a middleware function");
       }
-      var router5 = this.router;
+      var router6 = this.router;
       fns.forEach(function(fn2) {
         if (!fn2 || !fn2.handle || !fn2.set) {
-          return router5.use(path2, fn2);
+          return router6.use(path2, fn2);
         }
         debug(".use app under %s", path2);
         fn2.mountpath = path2;
         fn2.parent = this;
-        router5.use(path2, function mounted_app(req, res, next) {
+        router6.use(path2, function mounted_app(req, res, next) {
           var orig = req.app;
           fn2.handle(req, res, function(err) {
             Object.setPrototypeOf(req, orig.request);
@@ -24247,7 +24247,7 @@ var require_express = __commonJS({
     var EventEmitter = __require("node:events").EventEmitter;
     var mixin = require_merge_descriptors();
     var proto = require_application();
-    var Router5 = require_router();
+    var Router6 = require_router();
     var req = require_request();
     var res = require_response();
     exports = module.exports = createApplication;
@@ -24269,8 +24269,8 @@ var require_express = __commonJS({
     exports.application = proto;
     exports.request = req;
     exports.response = res;
-    exports.Route = Router5.Route;
-    exports.Router = Router5;
+    exports.Route = Router6.Route;
+    exports.Router = Router6;
     exports.json = bodyParser.json;
     exports.raw = bodyParser.raw;
     exports.static = require_serve_static();
@@ -34548,7 +34548,7 @@ var require_utils5 = __commonJS({
     var nodeCrypto = __require("crypto");
     module.exports = {
       postgresMd5PasswordHash,
-      randomBytes: randomBytes2,
+      randomBytes: randomBytes3,
       deriveKey,
       sha256,
       hashByName,
@@ -34558,7 +34558,7 @@ var require_utils5 = __commonJS({
     var webCrypto = nodeCrypto.webcrypto || globalThis.crypto;
     var subtleCrypto = webCrypto.subtle;
     var textEncoder = new TextEncoder();
-    function randomBytes2(length) {
+    function randomBytes3(length) {
       return webCrypto.getRandomValues(Buffer.alloc(length));
     }
     async function md5(string) {
@@ -47831,20 +47831,362 @@ var init_app_storage = __esm({
   }
 });
 
+// src/routes/attendance.ts
+import { randomBytes as randomBytes2, randomUUID as randomUUID2 } from "node:crypto";
+function isRecord(value) {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+function isValidDate(value) {
+  return typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value);
+}
+function localDateTime(timestamp2) {
+  const parts = new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Asia/Gaza",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hourCycle: "h23"
+  }).formatToParts(timestamp2);
+  const get = (type) => parts.find((part) => part.type === type)?.value ?? "";
+  return {
+    date: `${get("year")}-${get("month")}-${get("day")}`,
+    time: `${get("hour")}:${get("minute")}:${get("second")}`
+  };
+}
+function recordsKey(ownerId, month) {
+  return `attendance:records:${ownerId}:${month}`;
+}
+function normalizeDigits(value) {
+  return value.replace(/[٠-٩]/g, (digit) => String("\u0660\u0661\u0662\u0663\u0664\u0665\u0666\u0667\u0668\u0669".indexOf(digit))).replace(/[۰-۹]/g, (digit) => String("\u06F0\u06F1\u06F2\u06F3\u06F4\u06F5\u06F6\u06F7\u06F8\u06F9".indexOf(digit))).normalize("NFKC").trim();
+}
+function readFailedPinStatus(address) {
+  const current = failedPinAttempts.get(address);
+  if (!current || current.resetAt <= Date.now()) {
+    if (failedPinAttempts.size >= 1e4) {
+      const now = Date.now();
+      for (const [client, entry] of failedPinAttempts) if (entry.resetAt <= now) failedPinAttempts.delete(client);
+      if (failedPinAttempts.size >= 1e4) return true;
+    }
+    failedPinAttempts.set(address, { count: 0, resetAt: Date.now() + pinFailureWindowMs });
+    return false;
+  }
+  return current.count >= pinFailureLimit;
+}
+function recordFailedPin(address) {
+  const current = failedPinAttempts.get(address);
+  if (current) current.count += 1;
+  else failedPinAttempts.set(address, { count: 1, resetAt: Date.now() + pinFailureWindowMs });
+}
+function clearFailedPin(address) {
+  failedPinAttempts.delete(address);
+}
+var import_express4, router4, kioskConfigKey, staffKey, failedPinAttempts, pinFailureLimit, pinFailureWindowMs, publicPunchBody, attendance_default;
+var init_attendance = __esm({
+  "src/routes/attendance.ts"() {
+    "use strict";
+    import_express4 = __toESM(require_express2(), 1);
+    init_logger();
+    init_app_storage();
+    router4 = (0, import_express4.Router)();
+    kioskConfigKey = "attendance:kiosk_config";
+    staffKey = "attendance:staff";
+    failedPinAttempts = /* @__PURE__ */ new Map();
+    pinFailureLimit = 10;
+    pinFailureWindowMs = 15 * 60 * 1e3;
+    router4.use((_request, response, next) => {
+      response.setHeader("Cache-Control", "no-store");
+      next();
+    });
+    router4.get("/attendance/admin/kiosk", requireSession, async (request, response) => {
+      try {
+        const pool2 = await getDataStore();
+        const { rows } = await pool2.query(
+          "SELECT value FROM app_data WHERE owner = $1 AND key = $2 LIMIT 1",
+          [request.appUser.id, kioskConfigKey]
+        );
+        const token = isRecord(rows[0]?.value) && typeof rows[0].value.token === "string" ? rows[0].value.token : null;
+        response.json({ token });
+      } catch (error) {
+        logger.error({ err: error }, "Attendance kiosk configuration read failed");
+        response.status(503).json({ error: "\u062A\u0639\u0630\u0631 \u062A\u062D\u0645\u064A\u0644 \u0625\u0639\u062F\u0627\u062F\u0627\u062A \u0631\u0627\u0628\u0637 \u062A\u0633\u062C\u064A\u0644 \u0627\u0644\u062D\u0636\u0648\u0631." });
+      }
+    });
+    router4.post("/attendance/admin/kiosk", requireSession, async (request, response) => {
+      const token = randomBytes2(32).toString("hex");
+      const key = `attendance:kiosk:${token}`;
+      try {
+        const pool2 = await getDataStore();
+        const client = await pool2.connect();
+        try {
+          await client.query("BEGIN");
+          await client.query(
+            "INSERT INTO app_data (owner, key, value, updated_at) VALUES ($1, $2, '{}'::jsonb, NOW()) ON CONFLICT (owner, key) DO NOTHING",
+            [request.appUser.id, kioskConfigKey]
+          );
+          const currentResult = await client.query(
+            "SELECT value FROM app_data WHERE owner = $1 AND key = $2 FOR UPDATE",
+            [request.appUser.id, kioskConfigKey]
+          );
+          const oldToken = isRecord(currentResult.rows[0]?.value) && typeof currentResult.rows[0].value.token === "string" ? currentResult.rows[0].value.token : null;
+          await client.query(
+            "INSERT INTO app_data (owner, key, value, updated_at) VALUES ($1, $2, $3::jsonb, NOW())",
+            [request.appUser.id, key, JSON.stringify({ enabled: true })]
+          );
+          await client.query(
+            "UPDATE app_data SET value = $1::jsonb, updated_at = NOW() WHERE owner = $2 AND key = $3",
+            [JSON.stringify({ token }), request.appUser.id, kioskConfigKey]
+          );
+          if (oldToken) {
+            await client.query(
+              "DELETE FROM app_data WHERE owner = $1 AND key = $2",
+              [request.appUser.id, `attendance:kiosk:${oldToken}`]
+            );
+          }
+          await client.query("COMMIT");
+        } catch (error) {
+          await client.query("ROLLBACK").catch((rollbackError) => logger.error({ err: rollbackError }, "Attendance kiosk transaction rollback failed"));
+          throw error;
+        } finally {
+          client.release();
+        }
+        response.json({ token });
+      } catch (error) {
+        logger.error({ err: error }, "Attendance kiosk configuration update failed");
+        response.status(503).json({ error: "\u062A\u0639\u0630\u0631 \u0625\u0646\u0634\u0627\u0621 \u0631\u0627\u0628\u0637 \u062A\u0633\u062C\u064A\u0644 \u0627\u0644\u062D\u0636\u0648\u0631." });
+      }
+    });
+    router4.get("/attendance/admin/staff", requireSession, async (request, response) => {
+      try {
+        const pool2 = await getDataStore();
+        const { rows } = await pool2.query(
+          "SELECT value FROM app_data WHERE owner = $1 AND key = $2 LIMIT 1",
+          [request.appUser.id, staffKey]
+        );
+        const staff = isRecord(rows[0]?.value) && Array.isArray(rows[0].value.employees) ? rows[0].value.employees.filter(isRecord) : [];
+        response.json({
+          employees: staff.map((employee) => ({
+            employeeId: employee.employeeId,
+            employeeNumber: employee.employeeNumber,
+            pinConfigured: typeof employee.pinHash === "string" && employee.pinHash.length > 0
+          }))
+        });
+      } catch (error) {
+        logger.error({ err: error }, "Attendance staff status read failed");
+        response.status(503).json({ error: "\u062A\u0639\u0630\u0631 \u062A\u062D\u0645\u064A\u0644 \u0625\u0639\u062F\u0627\u062F\u0627\u062A \u0623\u0631\u0642\u0627\u0645 \u0627\u0644\u0645\u0648\u0638\u0641\u064A\u0646 \u0627\u0644\u0633\u0631\u064A\u0629." });
+      }
+    });
+    router4.put("/attendance/admin/staff", requireSession, async (request, response) => {
+      const input = request.body?.employees;
+      if (!Array.isArray(input) || input.length > 1e3) {
+        response.status(400).json({ error: "\u0642\u0627\u0626\u0645\u0629 \u0627\u0644\u0645\u0648\u0638\u0641\u064A\u0646 \u063A\u064A\u0631 \u0635\u0627\u0644\u062D\u0629." });
+        return;
+      }
+      const employeeIds = /* @__PURE__ */ new Set();
+      const employeeNumbers = /* @__PURE__ */ new Set();
+      for (const employee of input) {
+        if (!isRecord(employee) || typeof employee.employeeId !== "string" || !employee.employeeId.trim() || employee.employeeId.length > 128 || typeof employee.employeeNumber !== "string" || !employee.employeeNumber.trim() || employee.employeeNumber.length > 64 || typeof employee.name !== "string" || !employee.name.trim() || employee.name.length > 200 || employee.pin !== void 0 && employee.pin !== "" && (typeof employee.pin !== "string" || !/^\d{6,12}$/.test(employee.pin)) || employee.clearPin !== void 0 && typeof employee.clearPin !== "boolean") {
+          response.status(400).json({ error: "\u062A\u0623\u0643\u062F \u0645\u0646 \u0631\u0642\u0645 \u0648\u0627\u0633\u0645 \u0643\u0644 \u0645\u0648\u0638\u0641 \u0648\u0623\u0646 \u0627\u0644\u0631\u0642\u0645 \u0627\u0644\u0633\u0631\u064A \u0645\u0646 6 \u0625\u0644\u0649 12 \u0631\u0642\u0645\u0627\u064B." });
+          return;
+        }
+        const id = employee.employeeId.trim();
+        const number = normalizeDigits(employee.employeeNumber);
+        if (employeeIds.has(id) || employeeNumbers.has(number)) {
+          response.status(400).json({ error: "\u062A\u0648\u062C\u062F \u0623\u0631\u0642\u0627\u0645 \u0645\u0648\u0638\u0641\u064A\u0646 \u0623\u0648 \u0645\u0639\u0631\u0641\u0627\u062A \u0645\u0643\u0631\u0631\u0629\u061B \u0635\u062D\u062D\u0647\u0627 \u0642\u0628\u0644 \u0627\u0644\u062D\u0641\u0638." });
+          return;
+        }
+        employeeIds.add(id);
+        employeeNumbers.add(number);
+      }
+      try {
+        const pool2 = await getDataStore();
+        const existingResult = await pool2.query(
+          "SELECT value FROM app_data WHERE owner = $1 AND key = $2 LIMIT 1",
+          [request.appUser.id, staffKey]
+        );
+        const existing = isRecord(existingResult.rows[0]?.value) && Array.isArray(existingResult.rows[0].value.employees) ? existingResult.rows[0].value.employees.filter(isRecord) : [];
+        const existingById = new Map(existing.map((employee) => [String(employee.employeeId), employee]));
+        const employees = [];
+        for (const rawEmployee of input) {
+          const employeeId = rawEmployee.employeeId.trim();
+          const previous = existingById.get(employeeId);
+          let pinHash = rawEmployee.clearPin === true ? "" : typeof previous?.pinHash === "string" ? previous.pinHash : "";
+          if (typeof rawEmployee.pin === "string" && rawEmployee.pin) pinHash = await hashPassword(rawEmployee.pin);
+          employees.push({
+            employeeId,
+            employeeNumber: rawEmployee.employeeNumber.trim(),
+            name: rawEmployee.name.trim(),
+            pinHash
+          });
+        }
+        await pool2.query(
+          `INSERT INTO app_data (owner, key, value, updated_at) VALUES ($1, $2, $3::jsonb, NOW())
+       ON CONFLICT (owner, key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`,
+          [request.appUser.id, staffKey, JSON.stringify({ employees })]
+        );
+        response.json({ saved: true, configuredCount: employees.filter((employee) => employee.pinHash).length });
+      } catch (error) {
+        logger.error({ err: error }, "Attendance employee PIN update failed");
+        response.status(503).json({ error: "\u062A\u0639\u0630\u0631 \u062D\u0641\u0638 \u0623\u0631\u0642\u0627\u0645 \u0627\u0644\u0645\u0648\u0638\u0641\u064A\u0646 \u0627\u0644\u0633\u0631\u064A\u0629." });
+      }
+    });
+    router4.get("/attendance/admin/records", requireSession, async (request, response) => {
+      const from = request.query.from;
+      const to = request.query.to;
+      if (!isValidDate(from) || !isValidDate(to) || from > to) {
+        response.status(400).json({ error: "\u062D\u062F\u062F \u0641\u062A\u0631\u0629 \u0632\u0645\u0646\u064A\u0629 \u0635\u062D\u064A\u062D\u0629 \u0644\u062A\u0642\u0631\u064A\u0631 \u0627\u0644\u062D\u0636\u0648\u0631." });
+        return;
+      }
+      const fromDate = /* @__PURE__ */ new Date(`${from}T00:00:00Z`);
+      const toDate = /* @__PURE__ */ new Date(`${to}T00:00:00Z`);
+      if (!Number.isFinite(fromDate.getTime()) || !Number.isFinite(toDate.getTime()) || fromDate.toISOString().slice(0, 10) !== from || toDate.toISOString().slice(0, 10) !== to) {
+        response.status(400).json({ error: "\u0623\u062F\u062E\u0644 \u062A\u0627\u0631\u064A\u062E\u064A\u0646 \u0635\u0627\u0644\u062D\u064A\u0646 \u0644\u062A\u0642\u0631\u064A\u0631 \u0627\u0644\u062D\u0636\u0648\u0631." });
+        return;
+      }
+      if ((toDate.getTime() - fromDate.getTime()) / 864e5 > 730) {
+        response.status(400).json({ error: "\u0627\u0644\u0641\u062A\u0631\u0629 \u0627\u0644\u0642\u0635\u0648\u0649 \u0644\u062A\u0642\u0631\u064A\u0631 \u0627\u0644\u062D\u0636\u0648\u0631 \u0633\u0646\u062A\u0627\u0646." });
+        return;
+      }
+      const months = [];
+      const cursor = new Date(Date.UTC(fromDate.getUTCFullYear(), fromDate.getUTCMonth(), 1));
+      const last = new Date(Date.UTC(toDate.getUTCFullYear(), toDate.getUTCMonth(), 1));
+      while (cursor <= last) {
+        months.push(`${cursor.getUTCFullYear()}-${String(cursor.getUTCMonth() + 1).padStart(2, "0")}`);
+        cursor.setUTCMonth(cursor.getUTCMonth() + 1);
+      }
+      try {
+        const pool2 = await getDataStore();
+        const keys = months.map((month) => recordsKey(request.appUser.id, month));
+        const { rows } = await pool2.query(
+          "SELECT value FROM app_data WHERE owner = $1 AND key = ANY($2::text[])",
+          [request.appUser.id, keys]
+        );
+        const records = rows.flatMap((row) => Array.isArray(row.value) ? row.value : []).filter((record) => isRecord(record) && typeof record.date === "string" && record.date >= from && record.date <= to);
+        response.json({ records });
+      } catch (error) {
+        logger.error({ err: error }, "Attendance report read failed");
+        response.status(503).json({ error: "\u062A\u0639\u0630\u0631 \u062A\u062D\u0645\u064A\u0644 \u062A\u0642\u0631\u064A\u0631 \u0627\u0644\u062D\u0636\u0648\u0631." });
+      }
+    });
+    publicPunchBody = import_express4.default.json({ limit: "8kb" });
+    router4.post("/attendance/public/:token/punch", publicPunchBody, async (request, response) => {
+      const address = request.ip || "unknown";
+      const tokenParam = request.params.token;
+      const token = Array.isArray(tokenParam) ? tokenParam[0] ?? "" : tokenParam;
+      const { employeeNumber, pin, action } = request.body ?? {};
+      if (!/^[a-f0-9]{64}$/.test(token) || typeof employeeNumber !== "string" || employeeNumber.trim().length < 1 || employeeNumber.trim().length > 64 || typeof pin !== "string" || !/^\d{6,12}$/.test(pin) || action !== "in" && action !== "out") {
+        response.status(400).json({ error: "\u0623\u062F\u062E\u0644 \u0631\u0642\u0645 \u0627\u0644\u0645\u0648\u0638\u0641 \u0648\u0631\u0642\u0645\u0647 \u0627\u0644\u0633\u0631\u064A \u0627\u0644\u0645\u0643\u0648\u0651\u0646 \u0645\u0646 6 \u0625\u0644\u0649 12 \u0631\u0642\u0645\u0627\u064B\u060C \u0648\u0627\u062E\u062A\u0631 \u062A\u0633\u062C\u064A\u0644 \u0627\u0644\u062D\u0636\u0648\u0631 \u0623\u0648 \u0627\u0644\u0627\u0646\u0635\u0631\u0627\u0641." });
+        return;
+      }
+      const normalizedEmployeeNumber = normalizeDigits(employeeNumber);
+      const normalizedPin = normalizeDigits(pin);
+      const failureKey = `${address}:${normalizedEmployeeNumber.toLocaleLowerCase("en-US")}`;
+      if (readFailedPinStatus(failureKey)) {
+        response.status(429).json({ error: "\u0645\u062D\u0627\u0648\u0644\u0627\u062A \u0643\u062B\u064A\u0631\u0629 \u0644\u0647\u0630\u0627 \u0627\u0644\u0645\u0648\u0638\u0641 \u0645\u0646 \u0647\u0630\u0627 \u0627\u0644\u0627\u062A\u0635\u0627\u0644. \u0627\u0646\u062A\u0638\u0631 15 \u062F\u0642\u064A\u0642\u0629 \u062B\u0645 \u0623\u0639\u062F \u0627\u0644\u0645\u062D\u0627\u0648\u0644\u0629." });
+        return;
+      }
+      try {
+        const pool2 = await getDataStore();
+        const { rows: owners } = await pool2.query(
+          "SELECT owner FROM app_data WHERE key = $1 AND value->>'enabled' = 'true' LIMIT 1",
+          [`attendance:kiosk:${token}`]
+        );
+        const owner = owners[0]?.owner;
+        if (!owner) {
+          response.status(404).json({ error: "\u0631\u0627\u0628\u0637 \u062A\u0633\u062C\u064A\u0644 \u0627\u0644\u062D\u0636\u0648\u0631 \u063A\u064A\u0631 \u0635\u0627\u0644\u062D \u0623\u0648 \u062A\u0645 \u0625\u064A\u0642\u0627\u0641\u0647." });
+          return;
+        }
+        const { rows: users } = await pool2.query(
+          "SELECT username FROM app_users WHERE id = $1 AND status = 'approved' LIMIT 1",
+          [owner]
+        );
+        const username = users[0]?.username;
+        const { rows: staffRows } = await pool2.query(
+          "SELECT value FROM app_data WHERE owner = $1 AND key = $2 LIMIT 1",
+          [owner, staffKey]
+        );
+        const employees = isRecord(staffRows[0]?.value) && Array.isArray(staffRows[0].value.employees) ? staffRows[0].value.employees.filter(isRecord) : [];
+        const employee = employees.find((item) => normalizeDigits(item.employeeNumber).toLocaleLowerCase("en-US") === normalizedEmployeeNumber.toLocaleLowerCase("en-US") && item.pinHash);
+        if (!username || !employee || !await verifyPassword(normalizedPin, employee.pinHash)) {
+          recordFailedPin(failureKey);
+          response.status(401).json({ error: "\u0631\u0642\u0645 \u0627\u0644\u0645\u0648\u0638\u0641 \u0623\u0648 \u0627\u0644\u0631\u0642\u0645 \u0627\u0644\u0633\u0631\u064A \u063A\u064A\u0631 \u0635\u062D\u064A\u062D." });
+          return;
+        }
+        clearFailedPin(failureKey);
+        const now = /* @__PURE__ */ new Date();
+        const local = localDateTime(now);
+        const key = recordsKey(owner, local.date.slice(0, 7));
+        const client = await pool2.connect();
+        let record;
+        try {
+          await client.query("BEGIN");
+          await client.query(
+            "INSERT INTO app_data (owner, key, value, updated_at) VALUES ($1, $2, '[]'::jsonb, NOW()) ON CONFLICT (owner, key) DO NOTHING",
+            [owner, key]
+          );
+          const existingResult = await client.query(
+            "SELECT value FROM app_data WHERE owner = $1 AND key = $2 FOR UPDATE",
+            [owner, key]
+          );
+          const existing = Array.isArray(existingResult.rows[0]?.value) ? existingResult.rows[0].value.filter((item) => isRecord(item) && typeof item.date === "string") : [];
+          const dayPunches = existing.filter((item) => item.employeeId === employee.employeeId && item.date === local.date);
+          const lastPunch = dayPunches[dayPunches.length - 1];
+          if (action === "in" && dayPunches.length > 0 || action === "out" && (!lastPunch || lastPunch.action !== "in")) {
+            await client.query("ROLLBACK");
+            response.status(409).json({
+              error: action === "in" ? "\u062A\u0645 \u062A\u0633\u062C\u064A\u0644 \u062D\u0636\u0648\u0631 \u0647\u0630\u0627 \u0627\u0644\u0645\u0648\u0638\u0641 \u0627\u0644\u064A\u0648\u0645 \u0645\u0633\u0628\u0642\u0627\u064B." : "\u0644\u0627 \u064A\u0648\u062C\u062F \u062A\u0633\u062C\u064A\u0644 \u062D\u0636\u0648\u0631 \u0645\u0641\u062A\u0648\u062D \u0644\u0647\u0630\u0627 \u0627\u0644\u0645\u0648\u0638\u0641 \u0627\u0644\u064A\u0648\u0645."
+            });
+            return;
+          }
+          record = {
+            id: randomUUID2(),
+            employeeId: employee.employeeId,
+            employeeNumber: employee.employeeNumber,
+            employeeName: employee.name,
+            action,
+            timestamp: now.toISOString(),
+            date: local.date,
+            time: local.time
+          };
+          await client.query(
+            "UPDATE app_data SET value = value || $1::jsonb, updated_at = NOW() WHERE owner = $2 AND key = $3",
+            [JSON.stringify([record]), owner, key]
+          );
+          await client.query("COMMIT");
+        } catch (error) {
+          await client.query("ROLLBACK");
+          throw error;
+        } finally {
+          client.release();
+        }
+        response.json({ saved: true, employeeName: employee.name, action, date: local.date, time: local.time });
+      } catch (error) {
+        logger.error({ err: error }, "Attendance punch submission failed");
+        response.status(503).json({ error: "\u062A\u0639\u0630\u0631 \u062A\u0633\u062C\u064A\u0644 \u0627\u0644\u062D\u0631\u0643\u0629 \u062D\u0627\u0644\u064A\u0627\u064B. \u0623\u0639\u062F \u0627\u0644\u0645\u062D\u0627\u0648\u0644\u0629 \u0628\u0639\u062F \u0642\u0644\u064A\u0644." });
+      }
+    });
+    attendance_default = router4;
+  }
+});
+
 // src/routes/index.ts
-var import_express4, router4, routes_default;
+var import_express5, router5, routes_default;
 var init_routes = __esm({
   "src/routes/index.ts"() {
     "use strict";
-    import_express4 = __toESM(require_express2(), 1);
+    import_express5 = __toESM(require_express2(), 1);
     init_health();
     init_document_ai();
     init_app_storage();
-    router4 = (0, import_express4.Router)();
-    router4.use(health_default);
-    router4.use(document_ai_default);
-    router4.use(app_storage_default);
-    routes_default = router4;
+    init_attendance();
+    router5 = (0, import_express5.Router)();
+    router5.use(health_default);
+    router5.use(document_ai_default);
+    router5.use(app_storage_default);
+    router5.use(attendance_default);
+    routes_default = router5;
   }
 });
 
@@ -47867,16 +48209,16 @@ function configuredAppOrigin() {
   }
   return origin.origin;
 }
-var import_express5, import_cors, import_pino_http, app, app_default;
+var import_express6, import_cors, import_pino_http, app, app_default;
 var init_app = __esm({
   "src/app.ts"() {
     "use strict";
-    import_express5 = __toESM(require_express2(), 1);
+    import_express6 = __toESM(require_express2(), 1);
     import_cors = __toESM(require_lib3(), 1);
     import_pino_http = __toESM(require_logger(), 1);
     init_routes();
     init_logger();
-    app = (0, import_express5.default)();
+    app = (0, import_express6.default)();
     app.set("trust proxy", process.env.TRUST_PROXY === "true");
     app.disable("x-powered-by");
     app.use((_request, response, next) => {
@@ -47913,10 +48255,10 @@ var init_app = __esm({
       methods: ["GET", "HEAD", "POST", "PUT", "DELETE"],
       allowedHeaders: ["Content-Type", "X-File-Name", "X-File-Type"]
     }));
-    app.use("/api/documents/ocr", import_express5.default.json({ limit: "8mb" }));
-    app.use("/api/storage", import_express5.default.json({ limit: "160mb" }));
-    app.use(import_express5.default.json({ limit: "512kb" }));
-    app.use(import_express5.default.urlencoded({ extended: true, limit: "100kb", parameterLimit: 100 }));
+    app.use("/api/documents/ocr", import_express6.default.json({ limit: "8mb" }));
+    app.use("/api/storage", import_express6.default.json({ limit: "160mb" }));
+    app.use(import_express6.default.json({ limit: "512kb" }));
+    app.use(import_express6.default.urlencoded({ extended: true, limit: "100kb", parameterLimit: 100 }));
     app.use("/api", routes_default);
     app_default = app;
   }

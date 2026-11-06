@@ -343,6 +343,23 @@ export async function centralChangePassword(currentPassword: string, newPassword
   await readResponse<{ updated: boolean }>(response)
 }
 
+export async function verifyUserPassword(password: string): Promise<void> {
+  if (!centralStorageEnabled) {
+    try {
+      const raw = localStorage.getItem("recon_credentials")
+      const credentials = raw ? JSON.parse(raw) as { password?: unknown } : null
+      const expected = typeof credentials?.password === "string" ? credentials.password : "admin123"
+      if (password !== expected) throw new Error("كلمة المرور غير صحيحة.")
+      return
+    } catch (error) {
+      if (error instanceof Error) throw error
+      throw new Error("تعذر التحقق من كلمة المرور.")
+    }
+  }
+  if (!currentUsername) throw new Error("انتهت جلسة الدخول. سجّل الدخول مجدداً.")
+  await centralLogin(currentUsername, password)
+}
+
 export async function centralSession(): Promise<CentralUser | null> {
   const response = await fetch("/api/auth/me", { credentials: "include" })
   if (response.status === 401) {

@@ -1,7 +1,7 @@
 "use client"
 
 import { useCallback, useEffect, useRef, useState } from "react"
-import { ChevronLeft } from "lucide-react"
+import { BellRing, ChevronLeft } from "lucide-react"
 import { LoginScreen } from "./login-screen"
 import { AppSidebar, type ViewId } from "./app-sidebar"
 import { ProfileView } from "./profile-view"
@@ -12,23 +12,44 @@ import App from "./reconciliation-app"
 import { AccountStatementProcessor } from "./account-statement-processor"
 import { DocumentStudio } from "./document-studio"
 import { UserFilesView } from "./user-files-view"
+import { DataIngestionHub } from "./data-ingestion-hub"
+import { WeeklyReportDashboard } from "./weekly-report-dashboard"
 import { AdminUsersView } from "./admin-users-view"
+import { CustomerBalances, type MissingCustomerPolicy } from "./customer-balances"
+import { CustomerNotes } from "./customer-notes"
+import { FuelManagement } from "./fuel-management"
+import { EmployeePayroll } from "./employee-payroll"
+import { TransfersManagement } from "./transfers-management"
+import { CashboxFinance } from "./cashbox-finance"
+import { SalesInvoice } from "./sales-invoice"
+import { AttendanceManagement } from "./attendance-management"
+import { useGlobalLoading } from "./global-loading"
 import { readSafetyAudit, SAFETY_AUDIT_LIMIT, SAFETY_LOCK_KEY, type SafetyAuditEntry, verifySafetyActivationPassword, verifySafetyUnlockPassword, writeSafetyAudit } from "../lib/safety-audit"
-import { centralLogout, centralSession, centralStorageEnabled, type CentralUser } from "../lib/central-storage"
+import { centralLogout, centralSession, centralStorageEnabled, centralStorageGet, centralStorageSet, type CentralUser } from "../lib/central-storage"
 
 const VIEW_LABELS: Record<ViewId, string> = {
   home: "الصفحة الرئيسية",
+  fuel: "منصة المحروقات",
+  payroll: "كشف رواتب الموظفين",
+  attendance: "الحضور والانصراف",
+  transfers: "منصة الحوالات",
+  cashbox: "الصندوق المالي",
+  salesInvoice: "منصة الفواتير",
+  customerBalances: "أرصدة الزبائن",
+  customerNotes: "ملاحظات وتذكيرات",
   documentStudio: "المستندات الذكية",
   recon: "أدوات التسوية",
   assistant: "مساعد المطابقة",
   manual: "المطابقة اليدوية",
   report: "تقرير الفروقات",
-  splitTool: "تجزئة الحوالات",
+  weeklyReport: "التقرير الأسبوعي الشامل",
+  splitTool: "تسوية حوالات وفواتير متعددة",
   batchCutoff: "تجميع فترة التعطل",
   clearing: "تسكير السندات",
   processor: "معالج الكشوفات",
   guide: "دليل المستخدم",
   files: "ملفاتي",
+  ingestion: "مركز رفع البيانات",
   adminUsers: "إدارة المستخدمين",
   profile: "الملف الشخصي",
   settings: "الإعدادات",
@@ -55,13 +76,66 @@ export function AppShell() {
   const [isAdmin, setIsAdmin] = useState(false)
   const [centralAuthError, setCentralAuthError] = useState("")
   const [centralStorageError, setCentralStorageError] = useState("")
+  const [customerPolicyError, setCustomerPolicyError] = useState("")
   const [view, setView] = useState<ViewId>("recon")
+  const [customerReminderCount, setCustomerReminderCount] = useState(0)
+  const [memoReminderCount, setMemoReminderCount] = useState(0)
+  const [customerMissingPolicy, setCustomerMissingPolicy] = useState<MissingCustomerPolicy>("keep_zero")
+  const [customerPolicyReady, setCustomerPolicyReady] = useState(false)
   const [collapsed, setCollapsed] = useState(false)
   const [hovering, setHovering] = useState(false)
   const [safetyLocked, setSafetyLocked] = useState(false)
   const [auditEntries, setAuditEntries] = useState<SafetyAuditEntry[]>([])
   const auditEntriesRef = useRef<SafetyAuditEntry[]>([])
   const safetyPasswordSequence = useRef({ value: "", lastKeyAt: 0 })
+  const customerPolicyStorageKey = `customer_balances_missing_policy:${(username ?? "").normalize("NFKC").trim().toLocaleLowerCase("en-US")}`
+
+  useGlobalLoading(!ready, "جاري تجهيز التطبيق...")
+  useGlobalLoading(
+    ready && view === "settings" && !customerPolicyReady && !customerPolicyError,
+    "جاري تحميل إعدادات الحساب...",
+  )
+
+  useEffect(() => {
+    if (!username) {
+      setCustomerPolicyReady(false)
+      return
+    }
+    let active = true
+    setCustomerPolicyReady(false)
+    const loadPolicy = async () => {
+      try {
+        const stored = centralStorageEnabled
+          ? await centralStorageGet<MissingCustomerPolicy>(customerPolicyStorageKey)
+          : localStorage.getItem(customerPolicyStorageKey)
+        if (!active) return
+        setCustomerMissingPolicy(stored === "hide_keep_history" ? "hide_keep_history" : "keep_zero")
+      } catch (cause) {
+        if (active) {
+          setCustomerMissingPolicy("keep_zero")
+          setCustomerPolicyError(cause instanceof Error ? `تعذر تحميل إعدادات أرصدة الزبائن: ${cause.message}` : "تعذر تحميل إعدادات أرصدة الزبائن.")
+        }
+      } finally {
+        if (active) setCustomerPolicyReady(true)
+      }
+    }
+    void loadPolicy()
+    return () => { active = false }
+  }, [customerPolicyStorageKey, username])
+
+  const changeCustomerMissingPolicy = async (policy: MissingCustomerPolicy) => {
+    try {
+      if (centralStorageEnabled) {
+        await centralStorageSet(customerPolicyStorageKey, policy)
+      } else {
+        localStorage.setItem(customerPolicyStorageKey, policy)
+      }
+      setCustomerMissingPolicy(policy)
+      setCustomerPolicyError("")
+    } catch (cause) {
+      setCustomerPolicyError(cause instanceof Error ? `تعذر حفظ إعدادات أرصدة الزبائن: ${cause.message}` : "تعذر حفظ إعدادات أرصدة الزبائن.")
+    }
+  }
 
   const appendAuditEntries = (entries: Array<Omit<SafetyAuditEntry, "id" | "occurredAt">>) => {
     if (!entries.length) return
@@ -337,8 +411,29 @@ export function AppShell() {
       </div>
       <div className="recon-scope flex-1 overflow-y-auto">
         {view === "home" && <App key="home" initialPage="main" onSafeActivities={onSafeActivities} />}
+        {view === "fuel" && <FuelManagement username={username ?? ""} />}
+        {view === "payroll" && <EmployeePayroll username={username ?? ""} />}
+        {view === "attendance" && centralStorageEnabled && <AttendanceManagement username={username ?? ""} onNavigateToPayroll={() => setView("payroll")} />}
+        {view === "transfers" && <TransfersManagement username={username ?? ""} />}
+        {view === "cashbox" && <CashboxFinance username={username ?? ""} />}
+        {view === "salesInvoice" && <SalesInvoice username={username ?? ""} />}
+        <CustomerBalances
+          onDueRemindersChange={setCustomerReminderCount}
+          remindersEnabled={!safetyLocked}
+          visible={view === "customerBalances"}
+          username={username ?? ""}
+          missingCustomerPolicy={customerMissingPolicy}
+          missingCustomerPolicyReady={customerPolicyReady}
+        />
+        <CustomerNotes
+          username={username ?? ""}
+          visible={view === "customerNotes"}
+          onDueRemindersChange={setMemoReminderCount}
+        />
         {view === "documentStudio" && <DocumentStudio />}
         {view === "files" && centralStorageEnabled && <UserFilesView />}
+        {view === "ingestion" && centralStorageEnabled && <DataIngestionHub />}
+        {view === "weeklyReport" && centralStorageEnabled && <WeeklyReportDashboard />}
         {view === "adminUsers" && isAdmin && centralStorageEnabled && <AdminUsersView />}
         {view === "recon" && <App key="recon" initialPage="recon2" onSafeActivities={onSafeActivities} />}
         {view === "assistant" && <App key="assistant" initialPage="assist" onSafeActivities={onSafeActivities} />}
@@ -357,6 +452,11 @@ export function AppShell() {
           onActivateSafetyLock={activateSafetyLock}
           onMarkAuditReviewed={markAuditReviewed}
           onChangeLoginPassword={changeLoginPassword}
+          customerMissingPolicy={customerMissingPolicy}
+          customerPolicyReady={customerPolicyReady}
+          customerPolicyError={customerPolicyError}
+          onCustomerMissingPolicyChange={policy => void changeCustomerMissingPolicy(policy)}
+          username={username}
         />}
       </div>
       {pendingAuditCount > 0 && !safetyLocked && (
@@ -367,6 +467,44 @@ export function AppShell() {
         >
           <span className="h-2 w-2 rounded-full bg-red-600" />
           {pendingAuditCount} محاولة غير آمنة بانتظار المراجعة
+        </button>
+      )}
+      {customerReminderCount > 0 && view !== "customerBalances" && !safetyLocked && (
+        <button
+          type="button"
+          onClick={() => setView("customerBalances")}
+          aria-label={`${customerReminderCount.toLocaleString("ar")} تذكير مستحق لأرصدة الزبائن`}
+          title={`${customerReminderCount.toLocaleString("ar")} تذكير مستحق لأرصدة الزبائن`}
+          className="group fixed right-4 top-4 z-50 flex h-11 w-11 items-center justify-center overflow-hidden whitespace-nowrap rounded-full border border-amber-300 bg-amber-50 text-amber-900 shadow-lg transition-[width,border-radius,background-color] duration-300 ease-out hover:w-80 hover:justify-start hover:rounded-lg hover:bg-amber-100 focus-visible:w-80 focus-visible:justify-start focus-visible:rounded-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500"
+        >
+          <span className="relative flex h-11 w-11 shrink-0 items-center justify-center">
+            <BellRing className="h-5 w-5" />
+            <span className="absolute -left-0.5 -top-0.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-amber-700 px-0.5 text-[9px] font-bold leading-none text-white">
+              {customerReminderCount.toLocaleString("ar")}
+            </span>
+          </span>
+          <span className="max-w-0 overflow-hidden text-xs font-semibold opacity-0 transition-[max-width,opacity] duration-300 group-hover:mr-1 group-hover:max-w-[280px] group-hover:opacity-100 group-focus-visible:mr-1 group-focus-visible:max-w-[280px] group-focus-visible:opacity-100">
+            {customerReminderCount.toLocaleString("ar")} تذكير مستحق لأرصدة الزبائن
+          </span>
+        </button>
+      )}
+      {memoReminderCount > 0 && view !== "customerNotes" && !safetyLocked && (
+        <button
+          type="button"
+          onClick={() => setView("customerNotes")}
+          aria-label={`${memoReminderCount.toLocaleString("ar")} تذكير مستحق في الملاحظات`}
+          title={`${memoReminderCount.toLocaleString("ar")} تذكير مستحق في الملاحظات`}
+          className="group fixed right-4 top-16 z-50 flex h-11 w-11 items-center justify-center overflow-hidden whitespace-nowrap rounded-full border border-cyan-300 bg-cyan-50 text-cyan-900 shadow-lg transition-[width,border-radius,background-color] duration-300 ease-out hover:w-80 hover:justify-start hover:rounded-lg hover:bg-cyan-100 focus-visible:w-80 focus-visible:justify-start focus-visible:rounded-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-500"
+        >
+          <span className="relative flex h-11 w-11 shrink-0 items-center justify-center">
+            <BellRing className="h-5 w-5" />
+            <span className="absolute -left-0.5 -top-0.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-cyan-700 px-0.5 text-[9px] font-bold leading-none text-white">
+              {memoReminderCount.toLocaleString("ar")}
+            </span>
+          </span>
+          <span className="max-w-0 overflow-hidden text-xs font-semibold opacity-0 transition-[max-width,opacity] duration-300 group-hover:mr-1 group-hover:max-w-[280px] group-hover:opacity-100 group-focus-visible:mr-1 group-focus-visible:max-w-[280px] group-focus-visible:opacity-100">
+            {memoReminderCount.toLocaleString("ar")} تذكير مستحق في الملاحظات
+          </span>
         </button>
       )}
       {safetyLocked && <SafetyLockOverlay activeScreen={VIEW_LABELS[view]} onAttempt={recordBlockedAction} onUnlock={unlockSafety} />}

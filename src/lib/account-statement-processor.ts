@@ -94,7 +94,8 @@ export function parseTabularRows(rows: StatementCell[][]): { headers: string[]; 
     const normalizedRow = columns.map((column) => normalizeHeader(row[column.index]))
     if (normalizedRow.length === normalizedHeaders.length && normalizedRow.every((cell, index) => cell === normalizedHeaders[index])) return []
     if (!columns.some((column) => hasValue(row[column.index]))) return []
-    return [columns.map((column) => row[column.index] ?? "")]
+    const values = columns.map((column) => row[column.index] ?? "")
+    return isStatementNoiseRow(headers, values) ? [] : [values]
   })
   return { headers, rows: data }
 }
@@ -159,6 +160,42 @@ export function isStatementBalanceSummaryRow(values: unknown[]): boolean {
   })
 }
 
+export function isStatementNoiseRow(headers: string[], values: unknown[]): boolean {
+  const populated = values
+    .map((value, index) => ({ value: String(value ?? "").trim(), index }))
+    .filter(({ value }) => value !== "")
+  if (!populated.length) return true
+  if (isStatementBalanceSummaryRow(values)) return true
+
+  const normalizedValues = populated.map(({ value }) => normalizeHeader(value))
+  const hasTotalsLabel = normalizedValues.some((value) =>
+    /(?:^|[^\p{L}])(?:المجموع|مجموع|الاجمالي|اجمالي|grandtotal|subtotal|total)(?=$|[^\p{L}])/u.test(value),
+  )
+  if (hasTotalsLabel) return true
+
+  const isDateColumnValue = populated.some(({ value, index }) => {
+    const header = normalizeHeader(headers[index] ?? "")
+    return /تاريخ|date/.test(header) && isDateValue(value)
+  })
+  if (isDateColumnValue) return false
+
+  if (normalizedValues.some((value) => /^(?:\*+|[-_=]+)$/.test(value))) return true
+
+  const repeatedHeaderCells = populated.filter(({ value, index }) =>
+    normalizeHeader(headers[index] ?? "") === normalizeHeader(value),
+  ).length
+  if (repeatedHeaderCells >= 2) return true
+
+  const labelOnlyRow = normalizedValues.every((value) =>
+    /^(?:فاتورة|الفاتورة|invoice|سندقبض|سندالصرف|receipt|paymentvoucher)$/.test(value)
+      || /^(?:\*+|[-_=]+)$/.test(value),
+  )
+  if (labelOnlyRow) return true
+
+  const hasStoreTitle = normalizedValues.some((value) => value.includes("بيتالجملة"))
+  return hasStoreTitle
+}
+
 export function removeStatementBalances(
   headers: string[],
   rows: Array<Record<string, unknown>>,
@@ -170,7 +207,7 @@ export function removeStatementBalances(
   return {
     headers: keptHeaders,
     rows: rows
-      .filter((row) => !isStatementBalanceSummaryRow(headers.map((header) => row[header])))
+      .filter((row) => !isStatementNoiseRow(headers, headers.map((header) => row[header])))
       .map((row) => Object.fromEntries(keptHeaders.map((header) => [header, cleanStatementText((row[header] ?? "") as StatementCell)]))),
   }
 }
@@ -182,7 +219,7 @@ function isDateValue(value: StatementCell): boolean {
     const serial = Number(text)
     return serial >= 20000 && serial <= 80000
   }
-  const match = text.match(/^(\d{1,4})[/-](\d{1,2})[/-](\d{1,4})$/)
+  const match = text.match(/^(\d{1,4})[/-](\d{1,2})[/-](\d{1,4})(?:[ T]\d{1,2}:\d{2}(?::\d{2})?(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?)?(?:\s*(?:AM|PM))?$/i)
   if (!match) return false
   const [, first, second, third] = match
   const [year, month, day] = first.length === 4
@@ -266,6 +303,7 @@ function extractRecognizedStatementRows(sheets: StatementSheet[]): ExtractedStat
       } else {
         if (isMetadataRow(sourceRow)) continue
         const transaction = active.indexes.map((index) => index < 0 ? "" : sourceRow[index] ?? "")
+        if (isStatementNoiseRow(headers, transaction)) continue
         if (isDateValue(transaction[1])) {
           if (typeof transaction[1] === "string") transaction[1] = transaction[1].trim()
         } else if (pageDate) {

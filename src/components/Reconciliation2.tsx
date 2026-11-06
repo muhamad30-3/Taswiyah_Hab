@@ -6,6 +6,7 @@ import { centralStorageEnabled, centralStorageGet, centralStorageSet, isCentralA
 import { clearStageASourceFiles, saveStageASourceFiles } from "../lib/stage-a-source-files";
 import { fetchStoredFile } from "../lib/central-storage";
 import { cleanStatementText, removeStatementBalances, type StatementCell } from "../lib/account-statement-processor";
+import { useGlobalLoading } from "./global-loading";
 import {
   Upload, FileSpreadsheet, Download, ChevronDown, X,
   Check, ChevronLeft, CreditCard,
@@ -35,6 +36,83 @@ function parseSheet(buf: ArrayBuffer) {
     Object.entries(row).map(([header, value]) => [header, cleanStatementText(value as StatementCell)])
   )));
   return cleaned;
+}
+function parseVisaInvoiceStatement(buf: ArrayBuffer): { headers: string[]; rows: Record<string, unknown>[]; skippedCardRows: number } | null {
+  const workbook = XLSX.read(buf, { type: "array", cellDates: true });
+  const normalizeHeader = (value: unknown) => String(value ?? "").normalize("NFKC")
+    .replace(/[\u064b-\u065f\u0670\u0640]/g, "")
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  for (const sheetName of workbook.SheetNames) {
+    const sheet = workbook.Sheets[sheetName];
+    const matrix = XLSX.utils.sheet_to_json<unknown[]>(sheet, { header: 1, defval: "" });
+    const headerIndex = matrix.findIndex(row => {
+      const headers = row.map(normalizeHeader);
+      return headers.includes("رقم القيد") && headers.includes("المدين") &&
+        headers.includes("دائن") && headers.includes("البيان") && headers.includes("بيان القيد");
+    });
+    if (headerIndex < 0) continue;
+
+    const sourceHeaders = matrix[headerIndex].map(value => String(value ?? "").trim());
+    const column = (name: string) => sourceHeaders.findIndex(header => normalizeHeader(header) === name);
+    const entryIndex = column("رقم القيد");
+    const dateIndex = column("التاريخ");
+    const debitIndex = column("المدين");
+    const creditIndex = column("دائن");
+    const descriptionIndex = column("البيان");
+    const detailsIndex = column("بيان القيد");
+    const rows: Record<string, unknown>[] = [];
+    let statementDate = "";
+    let skippedCardRows = 0;
+
+    for (const sourceRow of matrix.slice(headerIndex + 1)) {
+      const rawDescription = String(sourceRow[descriptionIndex] ?? "").trim();
+      const description = rawDescription
+        .replace(/[٠-٩]/g, digit => String("٠١٢٣٤٥٦٧٨٩".indexOf(digit)))
+        .replace(/[۰-۹]/g, digit => String("۰۱۲۳۴۵۶۷۸۹".indexOf(digit)));
+      const dateValue = sourceRow[dateIndex];
+      if (dateValue !== "" && dateValue != null) statementDate = fmtDate(dateValue);
+      if (!/(?:بطاقة\s*ائتمان|بطاقة\s*اعتماد|credit\s*card)/i.test(description)) continue;
+
+      const visaNumber = description.match(/(?:^|\D)(\d{4})\s*$/)?.[1];
+      const normalizeAmount = (value: unknown) => typeof value === "string"
+        ? value.replace(/[٠-٩]/g, digit => String("٠١٢٣٤٥٦٧٨٩".indexOf(digit)))
+          .replace(/[۰-۹]/g, digit => String("۰۱۲۳۴۵۶۷۸۹".indexOf(digit)))
+        : value;
+      const amount = Math.abs(toNum(normalizeAmount(sourceRow[debitIndex]))) ||
+        Math.abs(toNum(normalizeAmount(sourceRow[creditIndex])));
+      if (!amount) continue;
+      if (!visaNumber) {
+        skippedCardRows++;
+        continue;
+      }
+
+      const customerName = description
+        .replace(/^\s*(?:بطاقة\s*ائتمان|بطاقة\s*اعتماد|credit\s*card)\s*[/\\:=-]?\s*/i, "")
+        .replace(/(?:^|\D)\d{4}\s*$/, "")
+        .replace(/^[\s/\\:=-]+/, "")
+        .trim();
+      rows.push({
+        "رقم الفيزا": visaNumber,
+        "المبلغ": amount,
+        "اسم الزبون": customerName || `فيزا ${visaNumber}`,
+        "البيان الأصلي": rawDescription,
+        "التاريخ": statementDate,
+        "رقم القيد": sourceRow[entryIndex] ?? "",
+        "بيان القيد": sourceRow[detailsIndex] ?? "",
+        "__visaStatementProcessed": true,
+      });
+    }
+
+    return {
+      headers: ["رقم الفيزا", "المبلغ", "اسم الزبون", "البيان الأصلي", "التاريخ", "رقم القيد", "بيان القيد"],
+      rows,
+      skippedCardRows,
+    };
+  }
+  return null;
 }
 function fmtDate(v: unknown): string {
   if (!v) return "";
@@ -226,6 +304,8 @@ function advancedMatchCheck(cashierName: string, bankDesc: string): {
 // ─── Visa number detection ────────────────────────────────────────────────────
 const VISA_NUM_RE = new RegExp("[/-]\\s*(\\d{4})(?!\\d)");
 function extractVisaNumber(rawName: string): string | null {
+  const direct = rawName.trim().match(/^\d{4}$/);
+  if (direct) return direct[0];
   const m = rawName.match(VISA_NUM_RE);
   return m ? m[1] : null;
 }
@@ -259,6 +339,16 @@ function detectCardPaidColumn(headers: string[]): string {
 
 function detectAuthorizationColumn(headers: string[]): string {
   return autoDetect(headers, ["رقم التفويض", "authorization", "auth number", "auth no", "auth code", "approval code", "رقم الموافقة"]);
+}
+
+function detectVisaNumberColumn(headers: string[]): string {
+  const normalize = (header: string) => header.toLowerCase().normalize("NFKC")
+    .replace(/[\u064b-\u065f\u0670]/g, "")
+    .replace(/[_-]+/g, " ")
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return headers.find(header => /^(?:رقم الفيزا|رقم الفيزاء|visa number|visa no)$/.test(normalize(header))) || "";
 }
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -1975,6 +2065,7 @@ function StageCPlatform({ invoices, pendingBankInputs, onBack, onTransferToD, on
   const [invoiceHeaders, setInvoiceHeaders] = useState<string[]>([]);
   const [invoiceRows, setInvoiceRows] = useState<Record<string, unknown>[]>([]);
   const [invoiceMap, setInvoiceMap] = useState({ name: "", amount: "" });
+  const [invoiceStatementSkippedRows, setInvoiceStatementSkippedRows] = useState(0);
   const [results, setResults] = useState<StageCMatch[]>([]);
   const stageCDataLoaded = useRef(false);
   const [page, setPage] = useState(1);
@@ -1982,14 +2073,24 @@ function StageCPlatform({ invoices, pendingBankInputs, onBack, onTransferToD, on
   useEffect(() => {
     storageGet<any>("stage_c_platform_session", null).then(session => {
       if (session) {
+        const restoredHeaders = session.headers ?? [];
+        const restoredMap = { name: "", amount: "", auth: "", ...(session.map ?? {}) };
+        const visaColumn = detectVisaNumberColumn(restoredHeaders);
+        const authColumn = detectAuthorizationColumn(restoredHeaders);
+        if (visaColumn) restoredMap.name = visaColumn;
+        if (authColumn) restoredMap.auth = authColumn;
         setSonyFileName(session.sonyFileName ?? "");
-        setHeaders(session.headers ?? []);
+        setHeaders(restoredHeaders);
         setRows(session.rows ?? []);
-        setMap(session.map ?? { name: "", amount: "", auth: "" });
+        setMap(restoredMap);
         setInvoiceFileName(session.invoiceFileName ?? "");
         setInvoiceHeaders(session.invoiceHeaders ?? []);
         setInvoiceRows(session.invoiceRows ?? []);
-        setInvoiceMap(session.invoiceMap ?? { name: "", amount: "" });
+        setInvoiceStatementSkippedRows(session.invoiceStatementSkippedRows ?? 0);
+        setInvoiceMap({
+          ...(session.invoiceMap ?? { name: "", amount: "" }),
+          name: detectVisaNumberColumn(session.invoiceHeaders ?? []) || session.invoiceMap?.name || "",
+        });
         setResults(session.results ?? []);
       }
       stageCDataLoaded.current = true;
@@ -1998,23 +2099,30 @@ function StageCPlatform({ invoices, pendingBankInputs, onBack, onTransferToD, on
   useEffect(() => {
     if (!stageCDataLoaded.current) return;
     void storageSet("stage_c_platform_session", {
-      sonyFileName, headers, rows, map, invoiceFileName, invoiceHeaders, invoiceRows, invoiceMap, results,
+      sonyFileName, headers, rows, map, invoiceFileName, invoiceHeaders, invoiceRows, invoiceMap, invoiceStatementSkippedRows, results,
     });
-  }, [sonyFileName, headers, rows, map, invoiceFileName, invoiceHeaders, invoiceRows, invoiceMap, results]);
+  }, [sonyFileName, headers, rows, map, invoiceFileName, invoiceHeaders, invoiceRows, invoiceMap, invoiceStatementSkippedRows, results]);
   const parseAmount = (value: unknown) => Number.parseFloat(String(value ?? "").replace(/[٫٬]/g, match => match === "٫" ? "." : "").replace(/,/g, "")) || 0;
+  const processedVisaStatementRows = invoiceRows.filter(row => row.__visaStatementProcessed === true);
   const loadInvoiceFile = async (nextFile: File) => {
     try {
       await saveStageASourceFiles("stageC", "invoice", [nextFile]);
-      const parsed = parseSheet(await readFileBuf(nextFile));
+      const buffer = await readFileBuf(nextFile);
+      const visaStatement = parseVisaInvoiceStatement(buffer);
+      const parsed = visaStatement ?? parseSheet(buffer);
       setInvoiceFile(nextFile);
       setInvoiceFileName(nextFile.name);
       setInvoiceHeaders(parsed.headers);
       setInvoiceRows(parsed.rows);
+      setInvoiceStatementSkippedRows(visaStatement?.skippedCardRows ?? 0);
       setInvoiceMap({
-        name: autoDetect(parsed.headers, HINTS.name),
-        amount: detectCardPaidColumn(parsed.headers) || autoDetect(parsed.headers, ["paid", "مدفوع", "المبلغ المدفوع"]) || autoDetect(parsed.headers, HINTS.debit) || autoDetect(parsed.headers, ["amount", "مبلغ"])
+        name: visaStatement ? "رقم الفيزا" : detectVisaNumberColumn(parsed.headers) || autoDetect(parsed.headers, HINTS.name),
+        amount: visaStatement ? "المبلغ" : detectCardPaidColumn(parsed.headers) || autoDetect(parsed.headers, ["paid", "مدفوع", "المبلغ المدفوع"]) || autoDetect(parsed.headers, HINTS.debit) || autoDetect(parsed.headers, ["amount", "مبلغ"])
       });
-      setError(null);
+      setResults([]);
+      setError(visaStatement && !visaStatement.rows.length
+        ? "تم التعرف على كشف الفيزا، لكن لم توجد حركات بطاقة بمبلغ ورقم فيزا من 4 خانات."
+        : null);
     } catch (e) {
       setError((e as Error).message);
     }
@@ -2023,10 +2131,11 @@ function StageCPlatform({ invoices, pendingBankInputs, onBack, onTransferToD, on
     if (invoices.length) return invoices;
     return invoiceRows.map((row, index) => {
       const originalName = String(row[invoiceMap.name] ?? "").trim();
-      const name = originalName.replace(/(?:^|\D)\d{4}(?=\D|$)/, " ").replace(/\s+/g, " ").trim();
+      const name = String(row["اسم الزبون"] ?? "").trim() ||
+        originalName.replace(/(?:^|\D)\d{4}(?=\D|$)/, " ").replace(/\s+/g, " ").trim();
       return {
         id: index,
-        source: "فاتورة فيزا مرفوعة مباشرة",
+        source: row.__visaStatementProcessed === true ? "كشف فيزا مرفوع مباشرة" : "فاتورة فيزا مرفوعة مباشرة",
         name,
         originalName,
         amount: parseAmount(row[invoiceMap.amount]),
@@ -2039,10 +2148,10 @@ function StageCPlatform({ invoices, pendingBankInputs, onBack, onTransferToD, on
         discountAmount: 0,
         type: "مدفوع" as const,
         userId: "",
-        invoiceDate: "",
+        invoiceDate: String(row["التاريخ"] ?? ""),
         registrationTime: "",
         customerNumber: "",
-        invoiceNumber: stageAVisaNumber(originalName),
+        invoiceNumber: String(row["رقم القيد"] ?? "") || stageAVisaNumber(originalName),
         accountType: "",
         invoice: row,
         matched: true,
@@ -2058,7 +2167,7 @@ function StageCPlatform({ invoices, pendingBankInputs, onBack, onTransferToD, on
       const parsed = parseSheet(await readFileBuf(nextFile));
       setFile(nextFile); setHeaders(parsed.headers); setRows(parsed.rows);
       setSonyFileName(nextFile.name);
-      setMap({ name: autoDetect(parsed.headers, HINTS.name), amount: detectCardPaidColumn(parsed.headers) || autoDetect(parsed.headers, HINTS.debit) || autoDetect(parsed.headers, ["amount", "مبلغ"]), auth: detectAuthorizationColumn(parsed.headers) });
+      setMap({ name: detectVisaNumberColumn(parsed.headers) || autoDetect(parsed.headers, HINTS.name), amount: detectCardPaidColumn(parsed.headers) || autoDetect(parsed.headers, HINTS.debit) || autoDetect(parsed.headers, ["amount", "مبلغ"]), auth: detectAuthorizationColumn(parsed.headers) });
       setError(null);
     } catch (e) { setError((e as Error).message); }
   };
@@ -2168,8 +2277,13 @@ function StageCPlatform({ invoices, pendingBankInputs, onBack, onTransferToD, on
     {error && <div className="rounded-lg bg-red-100 p-3 text-sm text-red-800">{error}</div>}
     {!invoices.length && <div className="rounded-xl border border-slate-200 bg-white p-4">
       <h2 className="mb-3 text-sm font-bold">ملف فواتير الفيزا (إذا لم تُرحّل من A)</h2>
-      <DropZone file={invoiceFile} rowCount={invoiceRows.length} onFile={loadInvoiceFile} onClear={() => { setInvoiceFile(null); setInvoiceFileName(""); setInvoiceHeaders([]); setInvoiceRows([]); }} />
+      <DropZone file={invoiceFile} rowCount={invoiceRows.length} onFile={loadInvoiceFile} onClear={() => { setInvoiceFile(null); setInvoiceFileName(""); setInvoiceHeaders([]); setInvoiceRows([]); setInvoiceStatementSkippedRows(0); setResults([]); setError(null); }} />
       {!invoiceFile && invoiceFileName && <p className="mt-2 text-xs text-emerald-700">تم استعادة بيانات الملف المحفوظ: {invoiceFileName}</p>}
+      {!!processedVisaStatementRows.length && <div className="mt-3 rounded-lg border border-teal-200 bg-teal-50 p-3 text-xs leading-6 text-teal-900">
+        تمت معالجة كشف الفيزا تلقائياً واستخراج {processedVisaStatementRows.length} حركة برقم الفيزا المكوّن من 4 خانات والمبلغ.
+        {" "}إجمالي الحركات: {fmtNum(processedVisaStatementRows.reduce((total, row) => total + parseAmount(row["المبلغ"]), 0))}.
+        {invoiceStatementSkippedRows > 0 && ` تم تجاهل ${invoiceStatementSkippedRows} حركات لا تحتوي رقم فيزا من 4 خانات في البيان.`}
+      </div>}
       {!!invoiceHeaders.length && <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
         <Sel label="اسم الزبون مع رقم الفيزا" headers={invoiceHeaders} value={invoiceMap.name} onChange={value => setInvoiceMap(prev => ({ ...prev, name: value }))} />
         <Sel label="مبلغ الفاتورة" headers={invoiceHeaders} value={invoiceMap.amount} onChange={value => setInvoiceMap(prev => ({ ...prev, amount: value }))} />
@@ -2180,7 +2294,7 @@ function StageCPlatform({ invoices, pendingBankInputs, onBack, onTransferToD, on
       <DropZone file={file} rowCount={rows.length} onFile={loadSonyFile} onClear={() => { setFile(null); setSonyFileName(""); setHeaders([]); setRows([]); }} />
       {!file && sonyFileName && <p className="mt-2 text-xs text-emerald-700">تم استعادة بيانات الملف المحفوظ: {sonyFileName}</p>}
       {!!headers.length && <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-3">
-        <Sel label="البيان الذي يحتوي رقم الفيزا" headers={headers} value={map.name} onChange={value => setMap(prev => ({ ...prev, name: value }))} />
+        <Sel label="رقم الفيزا المستخدم للمطابقة" headers={headers} value={map.name} onChange={value => setMap(prev => ({ ...prev, name: value }))} />
         <Sel label="المبلغ" headers={headers} value={map.amount} onChange={value => setMap(prev => ({ ...prev, amount: value }))} />
         <Sel label="رقم التفويض" headers={headers} value={map.auth} onChange={value => setMap(prev => ({ ...prev, auth: value }))} />
       </div>}
@@ -2191,7 +2305,7 @@ function StageCPlatform({ invoices, pendingBankInputs, onBack, onTransferToD, on
         {" · "}فواتير بلا مطابقة: {results.filter(result => result.kind === "invoice" && !result.matched).length}
         {" · "}حركات سوني زائدة: {results.filter(result => result.kind === "sony-only").length}
       </div>
-      <div className="overflow-x-auto"><table className="w-full text-sm"><thead className="bg-slate-100 text-xs"><tr><th className="p-3 text-right">نوع السجل</th><th className="p-3 text-right">اسم الزبون / بيان سوني</th><th className="p-3 text-right">رقم الفيزا</th><th className="p-3 text-right">مبلغ الفاتورة</th><th className="p-3 text-right">مبلغ سوني</th><th className="p-3 text-right">رقم التفويض</th><th className="p-3 text-right">بيان سوني</th><th className="p-3 text-right">الحالة</th></tr></thead><tbody>
+      <div className="overflow-x-auto"><table className="w-full text-sm"><thead className="bg-slate-100 text-xs"><tr><th className="p-3 text-right">نوع السجل</th><th className="p-3 text-right">رقم الفيزا / بيان سوني</th><th className="p-3 text-right">رقم الفيزا</th><th className="p-3 text-right">مبلغ الفاتورة</th><th className="p-3 text-right">مبلغ سوني</th><th className="p-3 text-right">رقم التفويض</th><th className="p-3 text-right">بيان سوني</th><th className="p-3 text-right">الحالة</th></tr></thead><tbody>
         {pagedResults.map(result => <tr key={`${result.kind}-${result.invoice.source}-${result.invoice.id}`} className="border-t">
           <td className="p-3">{result.kind === "invoice" ? "فاتورة فيزا" : "حركة سوني زائدة"}</td>
           <td className="p-3">{result.kind === "invoice" ? result.invoice.name : result.sonyName}</td>
@@ -2215,7 +2329,7 @@ function StageCPlatform({ invoices, pendingBankInputs, onBack, onTransferToD, on
 }
 
 // ─── Main Component ───────────────────────────────────────────────────────────
-export default function Reconciliation2({ onBack, onStageAToMain, onStageBToMain, onSafeActivities, onOpenInvoiceReference, visaInvoices = [], initialStageDBankInputs = [], initialStage = "hub", projectSourceFiles = [] }: { onBack: () => void; onStageAToMain?: (results: StageAResult[], summary?: StageASummary) => void; onStageBToMain?: () => void; onSafeActivities?: (activities: string[]) => void; onOpenInvoiceReference?: (invoice: StageAResult) => boolean; visaInvoices?: StageAResult[]; initialStageDBankInputs?: StageDBankInput[]; initialStage?: "hub" | "stageA" | "stageB" | "stageC" | "stageD" | "stageF"; projectSourceFiles?: SavedProjectSourceFile[] }) {
+export default function Reconciliation2({ onBack, onStageAToMain, onStageBToMain, onSafeActivities, onOpenInvoiceReference, onClearAllSession, visaInvoices = [], initialStageDBankInputs = [], initialStage = "hub", projectSourceFiles = [] }: { onBack: () => void; onStageAToMain?: (results: StageAResult[], summary?: StageASummary) => void; onStageBToMain?: () => void; onSafeActivities?: (activities: string[]) => void; onOpenInvoiceReference?: (invoice: StageAResult) => boolean; onClearAllSession?: () => void; visaInvoices?: StageAResult[]; initialStageDBankInputs?: StageDBankInput[]; initialStage?: "hub" | "stageA" | "stageB" | "stageC" | "stageD" | "stageF"; projectSourceFiles?: SavedProjectSourceFile[] }) {
   const [stagePage, setStagePage] = useState<"hub" | "stageA" | "stageB" | "stageC" | "stageD" | "stageF">(initialStage);
   const [stageDMatches, setStageDMatches] = useState<StageCMatch[]>([]);
   const [stageDPending, setStageDPending] = useState<StageDBankInput[]>(initialStageDBankInputs);
@@ -2230,6 +2344,7 @@ export default function Reconciliation2({ onBack, onStageAToMain, onStageBToMain
   const openTransferDialog = (invoices: StageAResult[], from: "B" | "C") => setTransferDialog({ invoices, from });
   const stageCSessionLoaded = useRef(false);
   const [sessionLoaded, setSessionLoaded] = useState(false);
+  useGlobalLoading(!sessionLoaded, "جاري استعادة جلسة المطابقة...");
 
   useEffect(() => {
     storageGet<StageAResult[]>("stage_c_invoices", []).then(saved => {
@@ -2296,8 +2411,16 @@ export default function Reconciliation2({ onBack, onStageAToMain, onStageBToMain
         setAzaMap({ date:"", name:"", debit:"", credit:"", accountType:"", reference:"", ...(s.azaMap||{}) });
         setDailyHeaders(s.dailyHeaders || []); setDailyRowsRaw(s.dailyRowsRaw || []);
         setDailyMap({ date:"", name:"", debit:"", credit:"", accountType:"", reference:"", ...(s.dailyMap||{}) });
-        setSonyHeaders(s.sonyHeaders || []); setSonyRowsRaw(s.sonyRowsRaw || []);
-        setSonyMap({ date:"", name:"", debit:"", credit:"", accountType:"", authNum:"", ...(s.sonyMap||{}) });
+        const restoredSonyHeaders = s.sonyHeaders || [];
+        const restoredSonyMap = { date:"", name:"", debit:"", credit:"", accountType:"", authNum:"", ...(s.sonyMap||{}) };
+        const visaColumn = detectVisaNumberColumn(restoredSonyHeaders);
+        const authColumn = detectAuthorizationColumn(restoredSonyHeaders);
+        const amountColumn = detectCardPaidColumn(restoredSonyHeaders) || autoDetect(restoredSonyHeaders, HINTS.debit) || autoDetect(restoredSonyHeaders, ["amount", "مبلغ"]);
+        if (visaColumn) restoredSonyMap.name = visaColumn;
+        if (authColumn) restoredSonyMap.authNum = authColumn;
+        if (!restoredSonyMap.debit && !restoredSonyMap.credit) restoredSonyMap.debit = amountColumn;
+        setSonyHeaders(restoredSonyHeaders); setSonyRowsRaw(s.sonyRowsRaw || []);
+        setSonyMap(restoredSonyMap);
         setAuthHeaders(s.authHeaders || []); setAuthRowsRaw(s.authRowsRaw || []);
         setAuthMap({ name:"", authNum:"", amount:"", date:"", ...(s.authMap||{}) });
         setMatchedVisa(s.matchedVisa || []);
@@ -2367,9 +2490,9 @@ export default function Reconciliation2({ onBack, onStageAToMain, onStageBToMain
     try {
       const { headers, rows } = parseSheet(await readFileBuf(f));
       setSonyHeaders(headers); setSonyRowsRaw(rows);
-      setSonyMap({ date:autoDetect(headers,HINTS.date), name:autoDetect(headers,HINTS.name),
-        debit:autoDetect(headers,HINTS.debit), credit:autoDetect(headers,HINTS.credit),
-        accountType:autoDetect(headers,HINTS.accountType), authNum:autoDetect(headers,HINTS.authNum) });
+      setSonyMap({ date:autoDetect(headers,HINTS.date), name:detectVisaNumberColumn(headers) || autoDetect(headers,HINTS.name),
+        debit:detectCardPaidColumn(headers) || autoDetect(headers,HINTS.debit) || autoDetect(headers,["amount","مبلغ"]), credit:autoDetect(headers,HINTS.credit),
+        accountType:autoDetect(headers,HINTS.accountType), authNum:detectAuthorizationColumn(headers) });
     } catch(e) { setError((e as Error).message); }
   };
   const loadAuth = async (f: File) => {
@@ -2618,6 +2741,10 @@ export default function Reconciliation2({ onBack, onStageAToMain, onStageBToMain
   };
 
   const handleClearSession = () => {
+    if (onClearAllSession) {
+      onClearAllSession();
+      return;
+    }
     if (!window.confirm("مسح جلسة منصة الفيزا كاملة؟ سيتم حذف الملفات والنتائج المحفوظة.")) return;
     setBankFile(null); setBankHeaders([]); setBankRowsRaw([]);
     setAzaFile(null); setAzaHeaders([]); setAzaRowsRaw([]);

@@ -30,7 +30,7 @@ const allowedExtensions = new Set([
 
 type UserRole = "admin" | "user";
 type SessionPayload = { username: string; expiresAt: number };
-type AuthenticatedRequest = Request & { appUser?: { id: string; username: string; role: UserRole } };
+export type AuthenticatedRequest = Request & { appUser?: { id: string; username: string; role: UserRole } };
 
 function sessionSecret() {
   const secret = process.env.APP_SESSION_SECRET;
@@ -116,7 +116,7 @@ function clearSessionCookie(response: Response) {
   response.setHeader("Set-Cookie", `${sessionCookieName}=; Path=/api; HttpOnly; SameSite=Strict; Max-Age=0${secure}`);
 }
 
-async function getDataStore() {
+export async function getDataStore() {
   const { pool } = await import("@workspace/db");
   return pool;
 }
@@ -132,13 +132,13 @@ async function compressStorageResponse(jsonValue: string) {
   };
 }
 
-async function hashPassword(password: string) {
+export async function hashPassword(password: string) {
   const salt = randomBytes(16);
   const derived = await scrypt(password, salt, 64) as Buffer;
   return `${salt.toString("hex")}:${derived.toString("hex")}`;
 }
 
-async function verifyPassword(password: string, stored: string) {
+export async function verifyPassword(password: string, stored: string) {
   const [saltHex, hashHex, extra] = stored.split(":");
   if (!saltHex || !hashHex || extra !== undefined) return false;
   const salt = Buffer.from(saltHex, "hex");
@@ -205,7 +205,7 @@ function authReady(response: Response) {
   return true;
 }
 
-async function requireSession(request: AuthenticatedRequest, response: Response, next: NextFunction) {
+export async function requireSession(request: AuthenticatedRequest, response: Response, next: NextFunction) {
   if (!authReady(response)) return;
   const session = readSession(request);
   if (!session) {

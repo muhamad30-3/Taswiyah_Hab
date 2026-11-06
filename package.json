@@ -46,6 +46,7 @@
     "@tailwindcss/typography": "^0.5.15",
     "@tanstack/react-query": "",
     "@types/node": "",
+    "@types/qrcode": "^1.5.6",
     "@types/react": "",
     "@types/react-dom": "",
     "@vitejs/plugin-react": "",
@@ -84,7 +85,8 @@
   },
   "pnpm": {
     "overrides": {
-      "lightningcss": "1.33.0"
+      "lightningcss": "1.33.0",
+      "packageManager": "pnpm@12.3.4"
     }
   },
   "dependencies": {
@@ -92,6 +94,7 @@
     "jszip": "^3.10.2",
     "pdfjs-dist": "^4.10.38",
     "pptxgenjs": "^4.0.1",
+    "qrcode": "^1.5.4",
     "tesseract.js": "^7.0.0",
     "xlsx-js-style": "^1.2.0"
   }

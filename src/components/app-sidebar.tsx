@@ -1,8 +1,8 @@
 "use client"
 
-import { User, Settings, Scale, LogOut, ChevronLeft, Sparkles, Link2, BarChart3, FileSpreadsheet, Split, CalendarRange, ListChecks, Home, BookOpen, ScanText, FolderOpen, UserCog } from "lucide-react"
+import { User, Settings, Scale, LogOut, ChevronLeft, Sparkles, Link2, BarChart3, FileSpreadsheet, Split, CalendarRange, ListChecks, Home, BookOpen, ScanText, FolderOpen, UserCog, WalletCards, StickyNote, Upload, ChartNoAxesCombined, Fuel, Banknote, ArrowLeftRight, ReceiptText, CalendarCheck } from "lucide-react"
 
-export type ViewId = "home" | "documentStudio" | "recon" | "assistant" | "manual" | "report" | "splitTool" | "batchCutoff" | "clearing" | "processor" | "guide" | "files" | "adminUsers" | "profile" | "settings"
+export type ViewId = "home" | "fuel" | "payroll" | "attendance" | "transfers" | "cashbox" | "salesInvoice" | "customerBalances" | "customerNotes" | "documentStudio" | "recon" | "assistant" | "manual" | "report" | "weeklyReport" | "splitTool" | "batchCutoff" | "clearing" | "processor" | "guide" | "files" | "ingestion" | "adminUsers" | "profile" | "settings"
 
 export function AppSidebar({
   active,
@@ -25,16 +25,26 @@ export function AppSidebar({
 }) {
   const navItems: { id: ViewId; label: string; icon: typeof User }[] = [
     { id: "home", label: "الصفحة الرئيسية", icon: Home },
+    { id: "fuel", label: "منصة المحروقات", icon: Fuel },
+    { id: "payroll", label: "كشف رواتب الموظفين", icon: Banknote },
+    ...(centralStorage ? [{ id: "attendance" as const, label: "الحضور والانصراف", icon: CalendarCheck }] : []),
+    { id: "transfers", label: "منصة الحوالات", icon: ArrowLeftRight },
+    { id: "cashbox", label: "الصندوق المالي", icon: WalletCards },
+    { id: "salesInvoice", label: "منصة الفواتير", icon: ReceiptText },
+    { id: "customerBalances", label: "أرصدة الزبائن", icon: WalletCards },
+    { id: "customerNotes", label: "ملاحظات وتذكيرات", icon: StickyNote },
     { id: "documentStudio", label: "المستندات الذكية", icon: ScanText },
     { id: "recon", label: "أدوات التسوية", icon: Scale },
     { id: "assistant", label: "مساعد المطابقة", icon: Sparkles },
     { id: "manual", label: "المطابقة اليدوية", icon: Link2 },
     { id: "report", label: "تقرير الفروقات", icon: BarChart3 },
-    { id: "splitTool", label: "أداة تجزئة الحوالات", icon: Split },
+    ...(centralStorage ? [{ id: "weeklyReport" as const, label: "التقرير الأسبوعي الشامل", icon: ChartNoAxesCombined }] : []),
+    { id: "splitTool", label: "تسوية حوالات وفواتير متعددة", icon: Split },
     { id: "batchCutoff", label: "أداة تجميع فترة التعطل", icon: CalendarRange },
     { id: "clearing", label: "شاشة تسكير السندات", icon: ListChecks },
     { id: "processor", label: "معالج كشوفات الحسابات", icon: FileSpreadsheet },
     ...(centralStorage ? [{ id: "files" as const, label: "ملفاتي", icon: FolderOpen }] : []),
+    ...(centralStorage ? [{ id: "ingestion" as const, label: "مركز رفع البيانات", icon: Upload }] : []),
     ...(centralStorage && isAdmin ? [{ id: "adminUsers" as const, label: "إدارة المستخدمين", icon: UserCog }] : []),
     { id: "guide", label: "دليل المستخدم", icon: BookOpen },
     { id: "profile", label: "الملف الشخصي", icon: User },

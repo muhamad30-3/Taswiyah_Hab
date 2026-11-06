@@ -4,6 +4,7 @@ import { Trash2, Database, ShieldAlert, LockKeyhole, Check, Clock3 } from "lucid
 import { useState, type FormEvent } from "react"
 import { SAFETY_AUDIT_KEY, SAFETY_LOCK_KEY, SAFETY_PASSWORDS_KEY, saveSafetyPassword, type SafetyAuditEntry } from "../lib/safety-audit"
 import { passwordPolicyError } from "../lib/password-policy"
+import type { MissingCustomerPolicy } from "./customer-balances"
 
 function PasswordChangeForm({
   id,
@@ -102,6 +103,11 @@ export function SettingsView({
   onMarkAuditReviewed,
   onChangeLoginPassword,
   centralStorage = false,
+  customerMissingPolicy,
+  customerPolicyReady,
+  customerPolicyError,
+  onCustomerMissingPolicyChange,
+  username,
 }: {
   safetyLocked: boolean
   auditEntries: SafetyAuditEntry[]
@@ -109,6 +115,11 @@ export function SettingsView({
   onMarkAuditReviewed: () => void
   onChangeLoginPassword: (password: string) => void
   centralStorage?: boolean
+  customerMissingPolicy: MissingCustomerPolicy
+  customerPolicyReady: boolean
+  customerPolicyError: string
+  onCustomerMissingPolicyChange: (policy: MissingCustomerPolicy) => void
+  username: string | null
 }) {
   const [cleared, setCleared] = useState(false)
   const pendingEntries = auditEntries.filter(entry => entry.kind === "blocked" && !entry.reviewedAt)
@@ -116,7 +127,8 @@ export function SettingsView({
   const safeEntries = auditEntries.filter(entry => entry.kind === "safe")
 
   const clearReconData = () => {
-    const keep = new Set(["recon_auth", "recon_credentials", "recon_sidebar_collapsed", SAFETY_AUDIT_KEY, SAFETY_LOCK_KEY, SAFETY_PASSWORDS_KEY])
+    const normalizedUsername = (username ?? "").normalize("NFKC").trim().toLocaleLowerCase("en-US")
+    const keep = new Set(["recon_auth", "recon_credentials", "recon_sidebar_collapsed", SAFETY_AUDIT_KEY, SAFETY_LOCK_KEY, SAFETY_PASSWORDS_KEY, `customer_balances_missing_policy:${normalizedUsername}`])
     try {
       Object.keys(localStorage)
         .filter((k) => !keep.has(k))
@@ -140,6 +152,48 @@ export function SettingsView({
       </header>
 
       <div className="space-y-4">
+        <section className="space-y-4 rounded-xl border border-cyan-200 bg-cyan-50/60 p-5">
+          <div>
+            <h2 className="text-sm font-semibold text-cyan-950">طريقة تحديث أرصدة الزبائن</h2>
+            <p className="mt-1 text-xs leading-6 text-cyan-900">
+              الإعداد خاص بحسابك. في الخيارين نحتفظ بسجل الزبون وملاحظاته واتفاقاته، ولا نحذف أي زبون لمجرد اختفائه من الكشف.
+            </p>
+          </div>
+          <fieldset disabled={!customerPolicyReady} className="grid gap-3">
+            <legend className="sr-only">اختر طريقة التعامل مع الزبائن غير الظاهرين في الكشف</legend>
+            <label className={`flex cursor-pointer items-start gap-3 rounded-xl border bg-white p-4 ${customerMissingPolicy === "keep_zero" ? "border-cyan-500 ring-1 ring-cyan-300" : "border-cyan-100"}`}>
+              <input
+                type="radio"
+                name="customer-missing-policy"
+                value="keep_zero"
+                checked={customerMissingPolicy === "keep_zero"}
+                onChange={() => onCustomerMissingPolicyChange("keep_zero")}
+                className="mt-0.5 h-4 w-4 accent-cyan-700"
+              />
+              <span>
+                <span className="block text-xs font-bold text-slate-900">إبقاء الزبون ورصيده صفراً</span>
+                <span className="mt-1 block text-xs leading-5 text-slate-600">يظهر في قائمة الأرصدة برصيد صفر وبدون دائن أو مدين، ويظهر أيضاً في سجل الزبائن. (الخيار الافتراضي الموصى به)</span>
+              </span>
+            </label>
+            <label className={`flex cursor-pointer items-start gap-3 rounded-xl border bg-white p-4 ${customerMissingPolicy === "hide_keep_history" ? "border-cyan-500 ring-1 ring-cyan-300" : "border-cyan-100"}`}>
+              <input
+                type="radio"
+                name="customer-missing-policy"
+                value="hide_keep_history"
+                checked={customerMissingPolicy === "hide_keep_history"}
+                onChange={() => onCustomerMissingPolicyChange("hide_keep_history")}
+                className="mt-0.5 h-4 w-4 accent-cyan-700"
+              />
+              <span>
+                <span className="block text-xs font-bold text-slate-900">إخفاء الزبون الغائب من الأرصدة الحالية</span>
+                <span className="mt-1 block text-xs leading-5 text-slate-600">لا يظهر في قائمة الأرصدة حتى يعود في كشف لاحق، مع الاحتفاظ برصيده السابق وسجله في قسم سجل الزبائن.</span>
+              </span>
+            </label>
+          </fieldset>
+          {!customerPolicyReady && <p className="text-xs text-cyan-900">جارٍ تحميل إعداد حسابك...</p>}
+          {customerPolicyError && <p role="alert" className="rounded-lg border border-rose-200 bg-rose-50 p-3 text-xs text-rose-800">{customerPolicyError}</p>}
+        </section>
+
         <section className="rounded-xl border border-rose-300 bg-rose-50 p-5">
           <h2 className="mb-2 flex items-center gap-2 text-sm font-semibold text-rose-900">
             <ShieldAlert className="h-4 w-4" /> خط الأمان

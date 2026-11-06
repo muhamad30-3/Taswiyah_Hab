@@ -2,7 +2,78 @@
 @tailwind components;
 @tailwind utilities;
 
+.taswiyah-loading-dot {
+  animation: taswiyah-loading-bounce 900ms ease-in-out infinite;
+}
+
+.taswiyah-loading-dot:nth-child(2) {
+  animation-delay: 150ms;
+}
+
+.taswiyah-loading-dot:nth-child(3) {
+  animation-delay: 300ms;
+}
+
+.taswiyah-loading-indeterminate {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 35%;
+  animation: taswiyah-loading-slide 1.2s linear infinite;
+}
+
+@keyframes taswiyah-loading-bounce {
+  0%, 60%, 100% { transform: translateY(0); }
+  30% { transform: translateY(-7px); }
+}
+
+@keyframes taswiyah-loading-slide {
+  0% { left: 100%; transform: translateX(-100%); }
+  100% { left: -35%; transform: translateX(-100%); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .taswiyah-loading-dot,
+  .taswiyah-loading-indeterminate {
+    animation: none;
+  }
+}
+
+.report-print-logo {
+  display: none;
+}
+
+.payroll-page input[type="number"] {
+  appearance: textfield;
+  -moz-appearance: textfield;
+}
+
+.payroll-page input[type="number"]::-webkit-inner-spin-button,
+.payroll-page input[type="number"]::-webkit-outer-spin-button {
+  margin: 0;
+  -webkit-appearance: none;
+}
+
 @media print {
+  .taswiyah-loading-overlay {
+    display: none !important;
+  }
+
+  .report-print-logo {
+    display: block !important;
+    margin: 0 auto 10px !important;
+    text-align: center !important;
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+
+  .report-print-logo img {
+    display: inline-block !important;
+    width: 100px !important;
+    height: 68px !important;
+    object-fit: contain !important;
+  }
+
   @page {
     size: A4 portrait;
     margin: 11mm;
@@ -151,6 +222,69 @@
 
   .report-page section {
     box-shadow: none !important;
+  }
+
+  .weekly-report-no-print {
+    display: none !important;
+  }
+
+  body.transfer-printing,
+  body.transfer-printing #root,
+  body.transfer-printing #root > *,
+  body.transfer-printing .app-shell,
+  body.transfer-printing .recon-scope {
+    position: static !important;
+    width: auto !important;
+    height: auto !important;
+    min-height: 0 !important;
+    max-height: none !important;
+    overflow: visible !important;
+    background: #fff !important;
+  }
+
+  body.transfer-printing #root * {
+    visibility: hidden !important;
+  }
+
+  body.transfer-printing .transfer-print-report,
+  body.transfer-printing .transfer-print-report * {
+    visibility: visible !important;
+    color: #10243c !important;
+  }
+
+  body.transfer-printing .transfer-print-report {
+    position: absolute !important;
+    top: 0 !important;
+    right: 0 !important;
+    left: 0 !important;
+    display: block !important;
+    width: 100% !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    background: #fff !important;
+    color: #000 !important;
+  }
+
+  body.transfer-printing .transfer-print-report table {
+    width: 100% !important;
+    border-collapse: collapse !important;
+    table-layout: auto !important;
+    font-size: 8pt !important;
+  }
+
+  body.transfer-printing .transfer-print-report th,
+  body.transfer-printing .transfer-print-report td {
+    padding: 3px 2px !important;
+    border: 1px solid #444 !important;
+  }
+
+  body.transfer-printing .transfer-print-report thead {
+    display: table-header-group;
+  }
+
+  body.transfer-printing .transfer-print-report tr {
+    break-inside: avoid;
+    page-break-inside: avoid;
   }
 
 }

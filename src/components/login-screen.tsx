@@ -4,6 +4,7 @@ import { useEffect, useState } from "react"
 import { Lock, User, Eye, EyeOff, ArrowLeft } from "lucide-react"
 import { centralLogin, centralRegister, centralStorageEnabled, type CentralUser } from "../lib/central-storage"
 import { passwordPolicyError } from "../lib/password-policy"
+import { useGlobalLoading } from "./global-loading"
 
 export function LoginScreen({ onLogin, initialError }: { onLogin: (user: CentralUser) => void; initialError?: string }) {
   const [username, setUsername] = useState("")
@@ -15,6 +16,8 @@ export function LoginScreen({ onLogin, initialError }: { onLogin: (user: Central
   const [showDefaultCredentials, setShowDefaultCredentials] = useState(false)
   const [registrationMode, setRegistrationMode] = useState(false)
   const [busy, setBusy] = useState(false)
+
+  useGlobalLoading(busy, registrationMode ? "جاري إنشاء الحساب..." : "جاري تسجيل الدخول...")
 
   useEffect(() => {
     if (initialError) setError(initialError)

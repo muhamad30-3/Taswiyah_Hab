@@ -4,6 +4,7 @@ import { useState } from "react"
 import { Check } from "lucide-react"
 import { centralChangePassword, centralStorageEnabled } from "../lib/central-storage"
 import { passwordPolicyError } from "../lib/password-policy"
+import { useGlobalLoading } from "./global-loading"
 
 export function ProfileView({
   username,
@@ -18,6 +19,8 @@ export function ProfileView({
   const [saved, setSaved] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState("")
+
+  useGlobalLoading(busy, "جاري تحديث الملف الشخصي...")
 
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault()

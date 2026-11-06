@@ -33,15 +33,23 @@ export interface SplitAllocation {
   id: string;
   amount: number;
   kind: "company" | "external";
+  bankId?: number;
+  bankSessionId?: number;
   cashierId?: number;
   cashierSessionId?: number;
   note: string;
+}
+
+export interface SplitBankRef {
+  id: number;
+  sessionId: number;
 }
 
 export interface BankSplit {
   id: string;
   bankId: number;
   bankSessionId: number;
+  sourceBanks?: SplitBankRef[];
   originalAmount: number;
   description: string;
   date: string;
@@ -75,6 +83,12 @@ export interface ClearingGroup {
   total: number;
   note: string;
   savedAt: string;
+}
+
+export function bankSplitSourceRefs(split: BankSplit): SplitBankRef[] {
+  return split.sourceBanks?.length
+    ? split.sourceBanks
+    : [{ id: split.bankId, sessionId: split.bankSessionId }];
 }
 
 export function transactionKey(row: { id: number; _fileSessionId?: number }): string {
@@ -189,6 +203,9 @@ export function SplitTool({
   splits,
   unavailableBankKeys,
   unavailableCashierKeys,
+  initialBankKeys,
+  initialCashierKeys,
+  accountTypeFilter,
   onSave,
   onDelete,
   onReview,
@@ -200,6 +217,9 @@ export function SplitTool({
   splits: BankSplit[];
   unavailableBankKeys: Set<string>;
   unavailableCashierKeys: Set<string>;
+  initialBankKeys?: string[];
+  initialCashierKeys?: string[];
+  accountTypeFilter?: string;
   onSave: (split: BankSplit) => boolean;
   onDelete: (split: BankSplit) => void;
   onReview?: (cashier?: ToolCashierRow, bank?: ToolBankRow, detail?: string) => void;
@@ -208,67 +228,136 @@ export function SplitTool({
 }) {
   const availableBanks = bankRows.filter(row =>
     !unavailableBankKeys.has(sourceKey(row)) &&
-    !splits.some(split => split.bankId === row.id && split.bankSessionId === (row._fileSessionId ?? 0))
+    !splits.some(split => bankSplitSourceRefs(split).some(reference =>
+      reference.id === row.id && reference.sessionId === (row._fileSessionId ?? 0)
+    ))
   );
   const availableCashiers = cashierRows.filter(row => !unavailableCashierKeys.has(sourceKey(row)));
   const [bankSearch, setBankSearch] = useState("");
   const [cashierSearch, setCashierSearch] = useState("");
-  const [selectedBankKey, setSelectedBankKey] = useState("");
+  const [selectedBankKeys, setSelectedBankKeys] = useState<Set<string>>(() => new Set(initialBankKeys ?? []));
   const [bankPickerOpen, setBankPickerOpen] = useState(false);
   const [cashierPickerPartId, setCashierPickerPartId] = useState<string | null>(null);
   const [bankPage, setBankPage] = useState(1);
   const [cashierPage, setCashierPage] = useState(1);
   const pickerPageSize = 50;
-  const selectedBank = availableBanks.find(row => sourceKey(row) === selectedBankKey) ?? null;
-  const bankOptions = availableBanks.filter(row => matchesSearch(
-    [row.date, row.description, row.accountType, row.defaultRef, row.rawAmount, formatAmount(row.rawAmount)],
-    bankSearch,
-  ));
-  const cashierOptions = availableCashiers.filter(row => {
-    return (!selectedBank || row.type === selectedBank.type) &&
-      matchesSearch([row.date, row.name, row.rawName, row.ref, row.defaultRef, row.accountType, row.matchAmount, formatAmount(row.matchAmount)], cashierSearch);
-  });
+  const presetBanks = availableBanks.filter(row => initialBankKeys?.includes(sourceKey(row)));
+  const presetCashiers = availableCashiers.filter(row => initialCashierKeys?.includes(sourceKey(row)));
+  const platformBanks = availableBanks.filter(row =>
+    accountTypeFilter === undefined || row.accountType.trim() === accountTypeFilter
+  );
+  const platformCashiers = availableCashiers.filter(row =>
+    accountTypeFilter === undefined || row.accountType.trim() === accountTypeFilter
+  );
+  const selectedBanks = availableBanks.filter(row => selectedBankKeys.has(sourceKey(row)));
+  const bankOptions = platformBanks.filter(row =>
+    matchesSearch([row.date, row.description, row.accountType, row.defaultRef, row.rawAmount, formatAmount(row.rawAmount)], bankSearch)
+  );
+  const cashierOptions = platformCashiers.filter(row =>
+    (!selectedBanks.length || selectedBanks.some(bank => row.type === bank.type)) &&
+    matchesSearch([row.date, row.name, row.rawName, row.ref, row.defaultRef, row.accountType, row.matchAmount, formatAmount(row.matchAmount)], cashierSearch)
+  );
   const visibleBanks = bankOptions.slice((bankPage - 1) * pickerPageSize, bankPage * pickerPageSize);
   const visibleCashiers = cashierOptions.slice((cashierPage - 1) * pickerPageSize, cashierPage * pickerPageSize);
-  const [parts, setParts] = useState<Array<{ id: string; amount: string; kind: "company" | "external"; cashierKey: string; note: string }>>([
-    { id: `part-${Date.now()}`, amount: "", kind: "company", cashierKey: "", note: "" },
-  ]);
+  const [parts, setParts] = useState<Array<{ id: string; bankKey: string; amount: string; kind: "company" | "external"; cashierKey: string; note: string }>>(() => {
+    const makePart = (bankKey = "", cashierKey = "", amount = "") => ({
+      id: `part-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      bankKey, amount, kind: "company" as const, cashierKey, note: "",
+    });
+    if (presetBanks.length === 1 && presetCashiers.length > 0) {
+      return presetCashiers.map(cashier =>
+        makePart(sourceKey(presetBanks[0]), sourceKey(cashier), String(cashier.matchAmount)),
+      );
+    }
+    if (presetCashiers.length === 1 && presetBanks.length > 1) {
+      return presetBanks.map(bank =>
+        makePart(sourceKey(bank), sourceKey(presetCashiers[0]), String(bank.rawAmount)),
+      );
+    }
+    return [makePart(
+      presetBanks.length === 1 ? sourceKey(presetBanks[0]) : "",
+      presetCashiers.length === 1 ? sourceKey(presetCashiers[0]) : "",
+    )];
+  });
   const [formError, setFormError] = useState("");
-  const total = parts.reduce((sum, part) => sum + (Number(part.amount) || 0), 0);
-  const remaining = selectedBank ? selectedBank.rawAmount - total : 0;
+  const allocatedByBank = new Map<string, number>();
+  parts.forEach(part => allocatedByBank.set(part.bankKey, (allocatedByBank.get(part.bankKey) ?? 0) + (Number(part.amount) || 0)));
+  const selectionBankType = selectedBanks[0]?.type;
+  const selectionAccountType = selectedBanks[0]?.accountType.trim();
+  const bankSelectionCompatible = selectedBanks.every(bank =>
+    bank.type === selectionBankType && bank.accountType.trim() === selectionAccountType
+  );
+  const allocatedByInvoice = new Map<string, { row: ToolCashierRow; total: number }>();
+  parts.forEach(part => {
+    if (part.kind !== "company") return;
+    const row = availableCashiers.find(candidate => sourceKey(candidate) === part.cashierKey);
+    if (!row) return;
+    const key = sourceKey(row);
+    const current = allocatedByInvoice.get(key) ?? { row, total: 0 };
+    current.total += Number(part.amount) || 0;
+    allocatedByInvoice.set(key, current);
+  });
 
   const updatePart = (id: string, patch: Partial<(typeof parts)[number]>) => {
     setParts(current => current.map(part => part.id === id ? { ...part, ...patch } : part));
   };
 
+  const toggleBank = (row: ToolBankRow) => {
+    const key = sourceKey(row);
+    const next = new Set(selectedBankKeys);
+    if (next.has(key)) {
+      next.delete(key);
+      setParts(currentParts => currentParts.map(part => part.bankKey === key ? { ...part, bankKey: "" } : part));
+    } else {
+      next.add(key);
+      if (!selectedBankKeys.size) {
+        setParts(currentParts => currentParts.map(part => part.bankKey ? part : { ...part, bankKey: key }));
+      }
+    }
+    setSelectedBankKeys(next);
+    setFormError("");
+  };
+
   const save = () => {
     setFormError("");
-    if (!selectedBank) return setFormError("اختر حوالة من القائمة أولاً.");
-    if (parts.length < 2) return setFormError("أضف حصتين على الأقل لتجزئة الحوالة.");
+    if (!selectedBanks.length) return setFormError("اختر حوالة واحدة على الأقل.");
+    if (selectedBanks.length > 1 && !bankSelectionCompatible) {
+      return setFormError("اختر حوالات من الاتجاه والحساب نفسيهما في المجموعة.");
+    }
+    if (parts.length < 2) return setFormError("أضف حصتين على الأقل لربط الحوالات بالفواتير.");
     if (parts.some(part => !Number.isFinite(Number(part.amount)) || Number(part.amount) <= 0)) {
       return setFormError("أدخل مبلغاً موجباً لكل حصة.");
     }
-    if (Math.abs(total - selectedBank.rawAmount) > 0.01) {
-      return setFormError(`مجموع الحصص ${formatAmount(total)} ويجب أن يساوي أصل الحوالة ${formatAmount(selectedBank.rawAmount)} تماماً.`);
+    if (parts.some(part => !selectedBankKeys.has(part.bankKey))) {
+      return setFormError("اختر الحوالة المقابلة لكل حصة.");
+    }
+    for (const bank of selectedBanks) {
+      const allocated = allocatedByBank.get(sourceKey(bank)) ?? 0;
+      if (Math.abs(allocated - bank.rawAmount) > 0.01) {
+        return setFormError(`مجموع حصص حوالة «${bank.description}» (${formatAmount(allocated)}) يجب أن يساوي قيمتها (${formatAmount(bank.rawAmount)}).`);
+      }
     }
     const allocations: SplitAllocation[] = [];
     const allocatedByCashier = new Map<string, { row: ToolCashierRow; total: number }>();
     for (const part of parts) {
       const amount = Number(part.amount);
+      const bank = selectedBanks.find(row => sourceKey(row) === part.bankKey);
+      if (!bank) return setFormError("إحدى الحوالات المختارة لم تعد متاحة.");
       if (part.kind === "external") {
         if (!part.note.trim()) return setFormError("اكتب سبباً واضحاً لكل حصة خارج شركتكم.");
-        allocations.push({ id: part.id, amount, kind: "external", note: part.note.trim() });
+        allocations.push({ id: part.id, amount, kind: "external", bankId: bank.id, bankSessionId: bank._fileSessionId ?? 0, note: part.note.trim() });
         continue;
       }
       const cashier = availableCashiers.find(row => sourceKey(row) === part.cashierKey);
       if (!cashier) return setFormError("اربط كل حصة تخص شركتكم بفاتورة أو سند متاح.");
-      if (cashier.type !== selectedBank.type) return setFormError("اتجاه الحركة في الفاتورة لا يطابق اتجاه الحوالة.");
+      if (cashier.type !== bank.type) return setFormError("اتجاه الحركة في الفاتورة لا يطابق اتجاه الحوالة.");
+      if (cashier.accountType.trim() !== bank.accountType.trim()) return setFormError("يجب ربط الفاتورة بالحوالة التابعة للمنصة نفسها.");
       const key = sourceKey(cashier);
       const allocated = allocatedByCashier.get(key) ?? { row: cashier, total: 0 };
       allocated.total += amount;
       allocatedByCashier.set(key, allocated);
       allocations.push({
-        id: part.id, amount, kind: "company", cashierId: cashier.id,
+        id: part.id, amount, kind: "company", bankId: bank.id, bankSessionId: bank._fileSessionId ?? 0, cashierId: cashier.id,
         cashierSessionId: cashier._fileSessionId ?? 0, note: part.note.trim(),
       });
     }
@@ -281,54 +370,90 @@ export function SplitTool({
       return setFormError("اربط حصة واحدة على الأقل بفاتورة تخص شركتكم.");
     }
     const id = `split-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const primaryBank = selectedBanks[0];
     const didSave = onSave({
-      id, bankId: selectedBank.id, bankSessionId: selectedBank._fileSessionId ?? 0,
-      originalAmount: selectedBank.rawAmount, description: selectedBank.description,
-      date: selectedBank.date, allocations, savedAt: new Date().toISOString(),
+      id, bankId: primaryBank.id, bankSessionId: primaryBank._fileSessionId ?? 0,
+      sourceBanks: selectedBanks.map(bank => ({ id: bank.id, sessionId: bank._fileSessionId ?? 0 })),
+      originalAmount: selectedBanks.reduce((sum, bank) => sum + bank.rawAmount, 0),
+      description: selectedBanks.length === 1 ? primaryBank.description : `${selectedBanks.length} حوالات`,
+      date: primaryBank.date, allocations, savedAt: new Date().toISOString(),
     });
     if (!didSave) {
       setFormError("لم تحفظ التجزئة لأن إحدى الحركات لم تعد متاحة. راجع البيانات وحاول مجدداً.");
       return;
     }
-    setSelectedBankKey("");
+    setSelectedBankKeys(new Set());
     setBankSearch("");
     setBankPage(1);
-    setParts([{ id: `part-${Date.now()}`, amount: "", kind: "company", cashierKey: "", note: "" }]);
+    setParts([{ id: `part-${Date.now()}`, bankKey: "", amount: "", kind: "company", cashierKey: "", note: "" }]);
   };
 
   return (
-    <ToolFrame title="أداة تجزئة الحوالات (Split Tool)" subtitle="قسّم حوالة مشتركة إلى حصص موثقة. يمكن ربط عدة حصص بالسند نفسه ويُطابق مجموعها مع قيمته؛ الحصص الخارجية لا تدخل في مطابقة شركتكم." onBack={onBack}>
+    <ToolFrame title="تسوية عدة حوالات مع عدة فواتير" subtitle={`${accountTypeFilter ? `منصة ${accountTypeFilter} · ` : ""}اختر حوالة واحدة أو أكثر، ثم وزّع مبالغها على فاتورة واحدة أو أكثر. يمكن ربط فاتورة بعدة حوالات أو حوالة بعدة فواتير؛ لا تحفظ المجموعة إلا بعد تغطية قيمة كل حوالة وكل فاتورة بالكامل.`} onBack={onBack}>
+      {presetBanks.length > 0 && presetCashiers.length > 0 && (
+        <section className="rounded-xl border border-emerald-200 bg-emerald-50 p-4">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <h2 className="font-semibold text-emerald-900">تعبئة تلقائية من منصة {accountTypeFilter || presetBanks[0].accountType}</h2>
+            <span className="rounded-full bg-white px-2.5 py-1 text-xs font-medium text-emerald-800">
+              {presetBanks.length} حوالة · {presetCashiers.length} فاتورة
+            </span>
+          </div>
+          <div className="mt-3 space-y-2">
+            {parts.map((part, index) => {
+              const bank = selectedBanks.find(row => sourceKey(row) === part.bankKey);
+              const cashier = availableCashiers.find(row => sourceKey(row) === part.cashierKey);
+              if (!bank && !cashier) return null;
+              return (
+                <div key={part.id} className="grid gap-1 rounded-lg border border-emerald-100 bg-white px-3 py-2 text-sm sm:grid-cols-[1fr_auto_1fr_auto] sm:items-center">
+                  <span><b>الحوالة:</b> {bank?.description || "لم تُحدد"} · {bank ? formatAmount(bank.rawAmount) : "—"}</span>
+                  <span className="hidden text-emerald-700 sm:inline">←</span>
+                  <span><b>فاتورة مقابل الحوالة {presetBanks.length === 1 ? (index === 0 ? "الأولى" : `رقم ${index + 1}`) : `رقم ${index + 1}`}:</b> {cashier?.name || "لم تُحدد"}</span>
+                  <b className="font-mono text-emerald-700">{formatAmount(Number(part.amount) || 0)}</b>
+                </div>
+              );
+            })}
+          </div>
+        </section>
+      )}
       <section className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(320px,0.8fr)]">
         <div className={panelClass}>
-          <h2 className="font-semibold">تجزئة حوالة</h2>
-          <label className={labelClass}>الحوالة الأصلية
+          <h2 className="font-semibold">الحوالات الداخلة في التسوية</h2>
+          <label className={labelClass}>اختر حوالة واحدة أو أكثر
             <button type="button" onClick={() => { setBankPickerOpen(true); setBankSearch(""); setBankPage(1); }} className={`${inputClass} flex items-center justify-between gap-3 text-right hover:border-primary`}>
-              <span className={selectedBank ? "text-foreground" : "text-muted-foreground"}>
-                {selectedBank ? `${selectedBank.date || "بلا تاريخ"} · ${selectedBank.description} · ${formatAmount(selectedBank.rawAmount)}` : "اختر حوالة أو حركة"}
+              <span className={selectedBanks.length ? "text-foreground" : "text-muted-foreground"}>
+                {selectedBanks.length ? `${selectedBanks.length} حوالة محددة · ${formatAmount(selectedBanks.reduce((sum, bank) => sum + bank.rawAmount, 0))}` : "اختر الحوالات"}
               </span>
               <Search className="h-4 w-4 shrink-0" />
             </button>
           </label>
-          {availableBanks.length > 0 && <p className="-mt-3 text-[11px] text-muted-foreground">الحركات المتاحة: {availableBanks.length}. اضغط للاختيار والبحث بالاسم أو التاريخ أو المبلغ.</p>}
-          {availableBanks.length === 0 && <p className="-mt-3 text-[11px] text-amber-700">لا توجد حوالات متاحة للتجزئة في الكشف الحالي.</p>}
-          {selectedBank && (
-            <div data-default-reference={selectedBank.defaultRef} className="rounded-xl border border-blue-200 bg-blue-50 p-3 text-sm text-blue-950">
-              <div className="flex flex-wrap items-center gap-2 font-semibold">{selectedBank.description} <ReferenceButton row={selectedBank} onLocate={onOpenReference} /></div>
-              <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-xs">
-                <span>{selectedBank.date || "بلا تاريخ"}</span>
-                <span>الأصل: {formatAmount(selectedBank.rawAmount)}</span>
-                <span>المتبقي للتوزيع: <b>{formatAmount(remaining)}</b></span>
-              </div>
-            </div>
-          )}
+          {platformBanks.length > 0 && <p className="-mt-3 text-[11px] text-muted-foreground">الحركات المتاحة في المنصة: {platformBanks.length}. اضغط للاختيار والبحث بالاسم أو التاريخ أو المبلغ.</p>}
+          {platformBanks.length === 0 && <p className="-mt-3 text-[11px] text-amber-700">لا توجد حوالات متاحة للتسوية في هذه المنصة.</p>}
+          {selectedBanks.length > 0 && <div className="space-y-2">
+            {selectedBanks.map(bank => {
+              const allocated = allocatedByBank.get(sourceKey(bank)) ?? 0;
+              const difference = bank.rawAmount - allocated;
+              return <div key={sourceKey(bank)} data-default-reference={bank.defaultRef} className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-blue-200 bg-blue-50 p-3 text-sm text-blue-950">
+                <div><div className="flex flex-wrap items-center gap-2 font-semibold">{bank.description} <ReferenceButton row={bank} onLocate={onOpenReference} /></div>
+                  <div className="mt-1 text-xs">{bank.date || "بلا تاريخ"} · {bank.type} · {bank.accountType || "بلا حساب"} · الأصل {formatAmount(bank.rawAmount)} · الموزع {formatAmount(allocated)} · المتبقي {formatAmount(difference)}</div></div>
+                <button type="button" onClick={() => toggleBank(bank)} className="rounded-lg border border-blue-300 bg-white px-2.5 py-1.5 text-xs hover:bg-blue-100">إزالة</button>
+              </div>;
+            })}
+          </div>}
+          {selectedBanks.length > 1 && !bankSelectionCompatible && <p role="alert" className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800">يجب أن تكون الحوالات من الاتجاه والحساب نفسيهما.</p>}
           <div className="space-y-3">
             {parts.map((part, index) => (
               <article key={part.id} className="space-y-3 rounded-xl border p-3">
                 <div className="flex items-center justify-between gap-2">
                   <h3 className="text-sm font-semibold">الحصة {index + 1}</h3>
-                  {parts.length > 2 && <button type="button" onClick={() => setParts(current => current.filter(item => item.id !== part.id))} className="rounded-lg p-1.5 text-red-600 hover:bg-red-50" aria-label={`حذف الحصة ${index + 1}`}><Trash2 className="h-4 w-4" /></button>}
+                  {parts.length > 1 && <button type="button" onClick={() => setParts(current => current.filter(item => item.id !== part.id))} className="rounded-lg p-1.5 text-red-600 hover:bg-red-50" aria-label={`حذف الحصة ${index + 1}`}><Trash2 className="h-4 w-4" /></button>}
                 </div>
-                <div className="grid gap-3 sm:grid-cols-2">
+                <div className="grid gap-3 sm:grid-cols-3">
+                  <label className={labelClass}>الحوالة المصدر
+                    <select className={inputClass} value={part.bankKey} onChange={event => updatePart(part.id, { bankKey: event.target.value })}>
+                      <option value="">اختر حوالة</option>
+                      {selectedBanks.map(bank => <option key={sourceKey(bank)} value={sourceKey(bank)}>{bank.date || "بلا تاريخ"} · {bank.description} · {formatAmount(bank.rawAmount)}</option>)}
+                    </select>
+                  </label>
                   <label className={labelClass}>المبلغ
                     <input className={inputClass} type="number" min="0.01" step="0.01" value={part.amount} onChange={event => updatePart(part.id, { amount: event.target.value })} />
                   </label>
@@ -341,7 +466,7 @@ export function SplitTool({
                 </div>
                 {part.kind === "company" ? (
                   <div className="space-y-2">
-                    <label className={labelClass}>الفاتورة أو السند المقابل (يجوز ربط أكثر من حصة بالسند نفسه)
+                    <label className={labelClass}>{presetCashiers.length > 1 ? `اسم الخانة — فاتورة مقابل الحوالة ${index === 0 ? "الأولى" : `رقم ${index + 1}`}` : "اسم الخانة — الفاتورة أو السند المقابل"} (يجوز ربط الفاتورة بعدة حوالات)
                     <button type="button" onClick={() => { setCashierPickerPartId(part.id); setCashierSearch(""); setCashierPage(1); }} className={`${inputClass} flex items-center justify-between gap-3 text-right hover:border-primary`}>
                       <span className={part.cashierKey ? "text-foreground" : "text-muted-foreground"}>
                         {(() => {
@@ -364,26 +489,38 @@ export function SplitTool({
               </article>
             ))}
           </div>
+          {!!allocatedByInvoice.size && <div className="space-y-2 rounded-xl border bg-muted/20 p-3">
+            <h3 className="text-xs font-semibold">إجمالي التوزيع على كل فاتورة</h3>
+            {[...allocatedByInvoice.values()].map(({ row, total }) => {
+              const difference = row.matchAmount - total;
+              return <div key={sourceKey(row)} className="flex flex-wrap justify-between gap-2 text-xs">
+                <span>{row.name} · الفاتورة {formatAmount(row.matchAmount)}</span>
+                <span className={Math.abs(difference) <= 0.01 ? "font-semibold text-green-700" : "font-semibold text-amber-700"}>
+                  موزع {formatAmount(total)} · {Math.abs(difference) <= 0.01 ? "متطابق" : difference > 0 ? `متبقي ${formatAmount(difference)}` : `زيادة ${formatAmount(-difference)}`}
+                </span>
+              </div>;
+            })}
+          </div>}
           <div className="flex flex-wrap gap-2">
-            <button type="button" onClick={() => setParts(current => [...current, { id: `part-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, amount: "", kind: "company", cashierKey: "", note: "" }])} className="inline-flex items-center gap-1.5 rounded-lg border border-blue-200 px-3 py-2 text-xs font-semibold text-blue-700 hover:bg-blue-50">
+            <button type="button" onClick={() => setParts(current => [...current, { id: `part-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, bankKey: selectedBanks[0] ? sourceKey(selectedBanks[0]) : "", amount: "", kind: "company", cashierKey: "", note: "" }])} className="inline-flex items-center gap-1.5 rounded-lg border border-blue-200 px-3 py-2 text-xs font-semibold text-blue-700 hover:bg-blue-50">
               <Plus className="h-4 w-4" />إضافة حصة
             </button>
             <button type="button" onClick={save} className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-4 py-2 text-xs font-semibold text-white hover:bg-blue-700">
-              <Check className="h-4 w-4" />حفظ التجزئة
+              <Check className="h-4 w-4" />حفظ التسوية
             </button>
           </div>
           {formError && <p role="alert" className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">{formError}</p>}
-          <p className="text-xs leading-6 text-muted-foreground">لن تُحفظ التجزئة إلا إذا كان مجموع الحصص مساوياً لقيمة الحوالة الأصلية، وكانت كل حصة تخص شركتكم مرتبطة بحركة من نفس اتجاهها وقيمتها. لا يتم إنشاء قيد في البرنامج المحاسبي.</p>
+          <p className="text-xs leading-6 text-muted-foreground">يجب توزيع كامل مبلغ كل حوالة، ومساواة إجمالي التوزيع على كل فاتورة لقيمتها، مع تطابق اتجاه وحساب الحوالات. يمكن ربط الفاتورة بعدة حوالات أو توزيع الحوالة على عدة فواتير. لا يتم إنشاء قيد في البرنامج المحاسبي.</p>
         </div>
 
         <div className={panelClass}>
           <div className="flex items-center gap-2"><WalletCards className="h-5 w-5 text-blue-600" /><h2 className="font-semibold">التجزئات المحفوظة</h2></div>
           {!splits.length && <p className="rounded-xl bg-muted/40 p-4 text-sm text-muted-foreground">لم تُجزّأ أي حوالة بعد.</p>}
           {splits.map(split => (
-            <article key={split.id} data-default-reference={bankRows.find(row => row.id === split.bankId && (row._fileSessionId ?? 0) === split.bankSessionId)?.defaultRef}
+            <article key={split.id} data-default-reference={bankSplitSourceRefs(split).map(reference => bankRows.find(row => row.id === reference.id && (row._fileSessionId ?? 0) === reference.sessionId)?.defaultRef).filter(Boolean).join("|")}
               className="space-y-2 rounded-xl border p-3">
               <div className="flex items-start justify-between gap-2">
-                <div><p className="font-semibold">{split.description}</p><p className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">{split.date || "بلا تاريخ"} · الأصل {formatAmount(split.originalAmount)} <ReferenceButton row={bankRows.find(row => row.id === split.bankId && (row._fileSessionId ?? 0) === split.bankSessionId) ?? { id: split.bankId, _fileSessionId: split.bankSessionId }} onLocate={onOpenReference} /></p></div>
+                <div><p className="font-semibold">{split.description}</p><p className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">{bankSplitSourceRefs(split).length} حوالات · الإجمالي {formatAmount(split.originalAmount)}</p></div>
                 <button type="button" onClick={() => onDelete(split)} className="rounded-lg p-1.5 text-red-600 hover:bg-red-50" title="إلغاء التجزئة"><Trash2 className="h-4 w-4" /></button>
               </div>
               <div className="space-y-1.5">
@@ -391,8 +528,10 @@ export function SplitTool({
                   const row = allocation.kind === "company" && allocation.cashierId != null
                     ? cashierRows.find(candidate => candidate.id === allocation.cashierId && (candidate._fileSessionId ?? 0) === (allocation.cashierSessionId ?? 0))
                     : undefined;
+                  const sourceRef = { id: allocation.bankId ?? split.bankId, sessionId: allocation.bankSessionId ?? split.bankSessionId };
+                  const sourceBank = bankRows.find(bank => bank.id === sourceRef.id && (bank._fileSessionId ?? 0) === sourceRef.sessionId);
                   return <div key={allocation.id} data-default-reference={row?.defaultRef} className="flex flex-wrap justify-between gap-2 rounded-lg bg-muted/40 px-3 py-2 text-xs">
-                    <span className="flex flex-wrap items-center gap-2">{index + 1}. {allocation.kind === "company" ? "حصة شركتكم · مرتبطة بفاتورة" : `حصة خارجية · ${allocation.note}`} {row && <ReferenceButton row={row} onLocate={onOpenReference} />}</span>
+                    <span className="flex flex-wrap items-center gap-2">{index + 1}. {sourceBank?.description || "حوالة"} → {allocation.kind === "company" ? row?.name || "فاتورة الشركة" : `حصة خارجية · ${allocation.note}`} {sourceBank && <ReferenceButton row={sourceBank} onLocate={onOpenReference} />} {row && <ReferenceButton row={row} onLocate={onOpenReference} />}</span>
                     <b className="font-mono">{formatAmount(allocation.amount)}</b>
                   </div>;
                 })}
@@ -408,8 +547,8 @@ export function SplitTool({
           <section role="dialog" aria-modal="true" aria-labelledby="split-picker-title" className="flex max-h-[90vh] w-full max-w-5xl flex-col overflow-hidden rounded-2xl border bg-card shadow-2xl">
             <header className="flex items-start justify-between gap-3 border-b p-4 sm:p-5">
               <div>
-                <h2 id="split-picker-title" className="text-lg font-bold">{bankPickerOpen ? "اختيار الحوالة الأصلية" : "اختيار الفاتورة أو السند"}</h2>
-                <p className="mt-1 text-xs text-muted-foreground">ابحث بالاسم أو البيان أو التاريخ أو المبلغ، ثم اختر الحركة المطلوبة.</p>
+                <h2 id="split-picker-title" className="text-lg font-bold">{bankPickerOpen ? "اختيار الحوالات" : "اختيار الفاتورة أو السند"}</h2>
+                <p className="mt-1 text-xs text-muted-foreground">{bankPickerOpen ? "يمكن تحديد أكثر من حوالة. حدد الحركات التي تريد تسويتها معاً ثم أغلق النافذة." : "ابحث بالاسم أو البيان أو التاريخ أو المبلغ، ثم اختر الحركة المطلوبة."}</p>
               </div>
               <button type="button" onClick={() => { setBankPickerOpen(false); setCashierPickerPartId(null); }} className="rounded-lg p-2 hover:bg-muted" aria-label="إغلاق"><X className="h-5 w-5" /></button>
             </header>
@@ -432,17 +571,12 @@ export function SplitTool({
                   <tbody>
                     {bankPickerOpen ? visibleBanks.map(row => <tr key={sourceKey(row)} data-default-reference={row.defaultRef} className="border-t hover:bg-muted/30">
                       <td className="px-3 py-2.5">{row.date || "—"}</td><td className="px-3 py-2.5 font-medium">{row.description || "حركة بلا بيان"} <ReferenceButton row={row} onLocate={onOpenReference} /></td><td className="px-3 py-2.5">—</td><td className="px-3 py-2.5 text-xs text-muted-foreground">{row.accountType || "—"}</td><td className="px-3 py-2.5">{row.type}</td><td className="px-3 py-2.5 font-mono">{formatAmount(row.rawAmount)}</td>
-                      <td className="px-3 py-2.5 text-center"><div className="inline-flex items-center gap-1"><button type="button" onClick={() => onReview?.(undefined, row, "حوالة من أداة التجزئة")} title="إضافة الحوالة للمراجعة" aria-label="مراجعة الحوالة" className="rounded-lg border p-1.5 text-amber-700 hover:bg-amber-50"><Star className="h-4 w-4" /></button><button type="button" onClick={() => {
-                        setSelectedBankKey(sourceKey(row));
-                        setParts([{ id: `part-${Date.now()}`, amount: "", kind: "company", cashierKey: "", note: "" }]);
-                        setFormError("");
-                        setBankPickerOpen(false);
-                      }} className="rounded-lg bg-primary px-3 py-1.5 text-xs font-semibold text-primary-foreground hover:opacity-90">اختيار</button></div></td>
+                      <td className="px-3 py-2.5 text-center"><div className="inline-flex items-center gap-1"><button type="button" onClick={() => onReview?.(undefined, row, "حوالة من أداة تسوية الحوالات والفواتير")} title="إضافة الحوالة للمراجعة" aria-label="مراجعة الحوالة" className="rounded-lg border p-1.5 text-amber-700 hover:bg-amber-50"><Star className="h-4 w-4" /></button><button type="button" onClick={() => toggleBank(row)} className={`rounded-lg px-3 py-1.5 text-xs font-semibold ${selectedBankKeys.has(sourceKey(row)) ? "bg-blue-100 text-blue-800" : "bg-primary text-primary-foreground hover:opacity-90"}`}>{selectedBankKeys.has(sourceKey(row)) ? "محدد ✓" : "تحديد"}</button></div></td>
                     </tr>) : visibleCashiers.map(row => <tr key={sourceKey(row)} data-default-reference={row.defaultRef} className="border-t hover:bg-muted/30">
                       <td className="px-3 py-2.5">{row.date || "—"}</td><td className="px-3 py-2.5 font-medium">{row.name || row.rawName || "سند بلا اسم"} <ReferenceButton row={row} onLocate={onOpenReference} /></td><td className="px-3 py-2.5">{row.ref || "—"}</td><td className="px-3 py-2.5 text-xs text-muted-foreground">{row.accountType || "—"}</td><td className="px-3 py-2.5">{row.type}</td><td className="px-3 py-2.5 font-mono">{formatAmount(row.matchAmount)}</td>
                       <td className="px-3 py-2.5 text-center"><div className="inline-flex items-center gap-1"><button type="button" onClick={() => {
-                        const bank = selectedBank;
-                        onReview?.(row, bank ?? undefined, bank ? "فاتورة وحوالة مرشحتان للتجزئة" : "فاتورة من أداة التجزئة");
+                        const bank = selectedBanks[0];
+                        onReview?.(row, bank, bank ? "فاتورة وحوالة مرشحتان للتسوية" : "فاتورة من أداة تسوية الحوالات والفواتير");
                       }} title="إضافة الفاتورة للمراجعة" aria-label="مراجعة الفاتورة" className="rounded-lg border p-1.5 text-amber-700 hover:bg-amber-50"><Star className="h-4 w-4" /></button><button type="button" onClick={() => {
                         if (cashierPickerPartId) updatePart(cashierPickerPartId, { cashierKey: sourceKey(row) });
                         setCashierPickerPartId(null);
@@ -459,6 +593,10 @@ export function SplitTool({
                 <button type="button" disabled={(bankPickerOpen ? bankPage : cashierPage) <= 1} onClick={() => bankPickerOpen ? setBankPage(page => Math.max(1, page - 1)) : setCashierPage(page => Math.max(1, page - 1))} className="inline-flex items-center gap-1 rounded-lg border px-3 py-1.5 disabled:opacity-40"><ChevronRight className="h-4 w-4" />السابق</button>
                 <button type="button" disabled={(bankPickerOpen ? bankPage : cashierPage) >= Math.ceil((bankPickerOpen ? bankOptions.length : cashierOptions.length) / pickerPageSize)} onClick={() => bankPickerOpen ? setBankPage(page => Math.min(Math.ceil(bankOptions.length / pickerPageSize), page + 1)) : setCashierPage(page => Math.min(Math.ceil(cashierOptions.length / pickerPageSize), page + 1))} className="inline-flex items-center gap-1 rounded-lg border px-3 py-1.5 disabled:opacity-40">التالي<ChevronLeft className="h-4 w-4" /></button>
               </div>
+            </footer>}
+            {bankPickerOpen && <footer className="flex items-center justify-between gap-3 border-t p-3 text-xs">
+              <span>الحوالات المحددة: {selectedBanks.length} · الإجمالي: {formatAmount(selectedBanks.reduce((sum, bank) => sum + bank.rawAmount, 0))}</span>
+              <button type="button" onClick={() => setBankPickerOpen(false)} className="rounded-lg bg-primary px-4 py-2 font-semibold text-primary-foreground">اعتماد الاختيار</button>
             </footer>}
           </section>
         </div>
@@ -651,6 +789,7 @@ export function BatchCutoffTool({
   unavailableCashierKeys,
   onSave,
   onDelete,
+  onOpenMultiMatch,
   onReview,
   onOpenReference,
   onBack,
@@ -660,6 +799,7 @@ export function BatchCutoffTool({
   unavailableCashierKeys: Set<string>;
   onSave: (batch: CutoffBatch) => boolean;
   onDelete: (batch: CutoffBatch) => void;
+  onOpenMultiMatch: () => void;
   onReview?: (cashier?: ToolCashierRow, detail?: string) => void;
   onOpenReference?: (row: { id: number; _fileSessionId?: number; defaultRef?: string; rawAmount?: number }) => void;
   onBack: () => void;
@@ -742,6 +882,15 @@ export function BatchCutoffTool({
 
   return (
     <ToolFrame title="أداة تجميع فترة التعطل (Batch Cut-off Tool)" subtitle="اجمع فواتير الفترة الفعلية مقابل سند الإجمالي، وافحص يوماً قبل أو بعد عند الحاجة. لا تُسوّى مجموعة ذات فرق ولا يُختلق قيد لإخفائه." onBack={onBack}>
+      <section className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-blue-200 bg-blue-50 p-4">
+        <div>
+          <h2 className="font-semibold text-blue-950">تريد تسوية حوالات البنك مع الفواتير؟</h2>
+          <p className="mt-1 text-xs leading-5 text-blue-900">اختر حوالة أو عدة حوالات ثم وزعها على فاتورة أو عدة فواتير، أو اربط الفاتورة الواحدة بعدة حوالات.</p>
+        </div>
+        <button type="button" onClick={onOpenMultiMatch} className="inline-flex shrink-0 items-center gap-2 rounded-lg bg-blue-700 px-4 py-2.5 text-sm font-semibold text-white hover:bg-blue-800">
+          <WalletCards className="h-4 w-4" />تسوية حوالات وفواتير متعددة
+        </button>
+      </section>
       <section className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(300px,0.72fr)]">
         <div className={panelClass}>
           <h2 className="font-semibold">تكوين مجموعة فترة التعطل</h2>
@@ -774,7 +923,7 @@ export function BatchCutoffTool({
             <b>{aggregate.name}</b><div className="mt-1 text-xs">قيمة السند: {formatAmount(aggregate.matchAmount)} · {aggregate.date || "بلا تاريخ"}</div>
           </div>}
           <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border bg-muted/20 p-3 text-sm">
-            <span>مجموع {selectedRows.length} من {allCandidates.length} فاتورة محددة: <b className="font-mono">{formatAmount(selectedTotal)}</b></span>
+            <span>{aggregate ? <>مجموع {selectedRows.length} من {allCandidates.length} فاتورة محددة: <b className="font-mono">{formatAmount(selectedTotal)}</b></> : "اختر سند الإجمالي لاحتساب فواتير الفترة."}</span>
             <span className={`font-semibold ${isExact ? "text-green-700" : difference < -0.01 ? "text-red-700" : difference > 0.01 ? "text-amber-700" : "text-muted-foreground"}`}>
               {aggregate ? isExact ? "مطابق تماماً" : `الفرق عن السند: ${difference > 0 ? "+" : ""}${formatAmount(difference)}` : "اختر سند الإجمالي"}
             </span>
@@ -819,7 +968,9 @@ export function BatchCutoffTool({
                     <td className="px-3 py-2 text-center"><button type="button" onClick={() => onReview?.(row, aggregate ? `مجموعة مراجعة مع سند الإجمالي: ${aggregate.name}` : "فاتورة من أداة تجميع فترة التعطل")} title="إضافة الفاتورة إلى المراجعة" aria-label={`مراجعة ${row.name}`} className="rounded-lg border p-1.5 text-amber-700 hover:bg-amber-50"><Star className="h-4 w-4" /></button></td>
                   </tr>;
                 })}
-                {!candidates.length && <tr><td colSpan={6} className="py-8 text-center text-xs text-muted-foreground">لا توجد فواتير متاحة للفترة المحددة والاتجاه المختار.</td></tr>}
+                {!candidates.length && <tr><td colSpan={6} className="py-8 text-center text-xs text-muted-foreground">
+                  {!aggregate ? "اختر سند الإجمالي أولاً لعرض فواتير الفترة." : !canSelectPeriod ? "تحقق من تاريخ البداية والنهاية." : "لا توجد فواتير متاحة للفترة المحددة والاتجاه المختار."}
+                </td></tr>}
               </tbody>
             </table>
           </div>

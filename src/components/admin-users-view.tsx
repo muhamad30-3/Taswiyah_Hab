@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from "react"
 import { Check, RefreshCw, UserRoundX, Users } from "lucide-react"
 import { listAdminUsers, updateAdminUser, type AdminUser } from "../lib/central-storage"
+import { useGlobalLoading } from "./global-loading"
 
 const statusLabels: Record<AdminUser["status"], string> = {
   pending: "بانتظار الموافقة",
@@ -16,6 +17,8 @@ export function AdminUsersView() {
   const [busyId, setBusyId] = useState<string | null>(null)
   const [error, setError] = useState("")
   const [message, setMessage] = useState("")
+
+  useGlobalLoading(loading || busyId !== null, loading ? "جاري تحميل الحسابات..." : "جاري تحديث الحساب...")
 
   const refresh = useCallback(async () => {
     setLoading(true)

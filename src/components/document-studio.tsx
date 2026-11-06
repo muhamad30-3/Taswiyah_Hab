@@ -13,6 +13,8 @@ import {
 import { extractDocument, type ExtractedDocument } from "../lib/document-extractor"
 import { readUploadedDocument } from "../lib/document-reader"
 import { appendExtractedDataToWorkbook, CONTACT_WORKSHEET_NAME, FINANCIAL_WORKSHEET_NAME, styleWorksheetTable } from "../lib/workbook-append"
+import { REPORT_LOGO_PRINT_STYLES, reportLogoMarkup } from "../lib/report-branding"
+import { useGlobalLoading } from "./global-loading"
 
 type InputMode = "text" | "image" | "document"
 type ExportFormat = "excel" | "word" | "pdf" | "powerpoint"
@@ -352,6 +354,7 @@ export function DocumentStudio() {
   const [busy, setBusy] = useState(false)
   const [progress, setProgress] = useState(0)
   const [status, setStatus] = useState("")
+  useGlobalLoading(!!status, status || "جاري معالجة المستند...", undefined, progress)
   const [error, setError] = useState("")
   const [notice, setNotice] = useState("")
   const [selectedFormat, setSelectedFormat] = useState<ExportFormat | null>(null)
@@ -941,18 +944,28 @@ export function DocumentStudio() {
       ? `<h2>جهات الاتصال</h2><table><thead><tr>${(keepMessageTimestamps ? contactDateTimeColumns : contactColumns).map(cell => `<th>${htmlEscape(cell)}</th>`).join("")}</tr></thead><tbody>${result.contacts.map(contact => `<tr>${[contact.name, contact.email, contact.phone, contact.sender, ...(keepMessageTimestamps ? [contact.date, contact.time] : [])].map(cell => `<td>${htmlEscape(cell)}</td>`).join("")}</tr>`).join("")}</tbody></table>`
       : ""
     printDocument.open()
-    printDocument.write(`<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8"><title>مستند مستخرج</title><style>
+    printDocument.write(`<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8"><title>مستند مستخرج</title><style>${REPORT_LOGO_PRINT_STYLES}
       body{font-family:Arial,sans-serif;color:#1c2b3b;margin:24mm 18mm;line-height:1.8;direction:rtl}
       h1{font-size:22px;color:#183153;border-bottom:2px solid #d8e0e8;padding-bottom:10px}
       p{white-space:pre-wrap;margin:8px 0;font-size:12pt}.heading{font-weight:bold;font-size:15pt;margin-top:18px}
       table{width:100%;border-collapse:collapse;margin-top:20px;font-size:9pt;direction:rtl}
       th,td{border:1px solid #c9d2dc;padding:6px;text-align:right}th{background:#edf2f7}
       @page{size:A4;margin:12mm}
-    </style></head><body><h1>${htmlEscape(exportText.split(/\n/)[0]?.slice(0, 100) || "مستند مستخرج")}</h1>${paragraphs}${table}${contacts}</body></html>`)
+    </style></head><body>${reportLogoMarkup()}<h1>${htmlEscape(exportText.split(/\n/)[0]?.slice(0, 100) || "مستند مستخرج")}</h1>${paragraphs}${table}${contacts}</body></html>`)
     printDocument.close()
     const cleanup = () => window.setTimeout(() => frame.remove(), 1000)
-    frame.contentWindow?.addEventListener("afterprint", cleanup, { once: true })
-    window.setTimeout(() => frame.contentWindow?.print(), 250)
+    const printFrame = () => {
+      frame.contentWindow?.removeEventListener("afterprint", cleanup)
+      frame.contentWindow?.addEventListener("afterprint", cleanup, { once: true })
+      frame.contentWindow?.print()
+    }
+    const logo = printDocument.querySelector<HTMLImageElement>(".report-print-logo img")
+    if (logo && !logo.complete) {
+      logo.addEventListener("load", printFrame, { once: true })
+      logo.addEventListener("error", printFrame, { once: true })
+    } else {
+      window.setTimeout(printFrame, 250)
+    }
   }
 
   const exportSelected = async () => {
