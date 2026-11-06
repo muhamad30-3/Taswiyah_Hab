@@ -48297,7 +48297,7 @@ var server = tlsKeyPath && tlsCertPath ? createHttpsServer({
   key: readFileSync(tlsKeyPath),
   cert: readFileSync(tlsCertPath)
 }, app2) : createHttpServer(app2);
-server.listen(port, () => {
+server.listen(port, "0.0.0.0", () => {
   const protocol = tlsKeyPath ? "https" : "http";
   logger2.info({ port, protocol }, "Server listening");
 });

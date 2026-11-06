@@ -41,7 +41,7 @@ const server = tlsKeyPath && tlsCertPath
     }, app)
   : createHttpServer(app);
 
-server.listen(port, () => {
+server.listen(port, "0.0.0.0", () => {
   const protocol = tlsKeyPath ? "https" : "http";
   logger.info({ port, protocol }, "Server listening");
 });
