@@ -83,12 +83,6 @@
     "xlsx": "^0.18.5",
     "zod": ""
   },
-  "pnpm": {
-    "overrides": {
-      "lightningcss": "1.33.0",
-      "packageManager": "pnpm@12.3.4"
-    }
-  },
   "dependencies": {
     "docx": "^9.8.1",
     "jszip": "^3.10.2",
