@@ -2,6 +2,7 @@
   "name": "@workspace/taswiyah-hub",
   "version": "0.0.0",
   "private": true,
+  "packageManager": "pnpm@10.18.0",
   "type": "module",
   "scripts": {
     "dev": "node scripts/dev.mjs",
