@@ -2,7 +2,7 @@ import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import path from "path";
 
-const apiServerUrl = process.env.API_SERVER_URL ?? "http://localhost:8080";
+const apiServerUrl = process.env.API_SERVER_URL ?? "http://localhost:3000";
 let apiTarget: URL;
 try {
   apiTarget = new URL(apiServerUrl);
